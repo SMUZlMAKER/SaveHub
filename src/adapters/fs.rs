@@ -1,18 +1,21 @@
-#![allow(unused_variables)]
 use super::AdapterResult;
 use std::path::{Path, PathBuf};
 
 /// Раскрыть Windows-переменные окружения на текущем ПК.
 pub fn expand_path(path: &str) -> AdapterResult<PathBuf> {
-    todo!()
+    let mut expanded = path.to_owned();
+    for (key, value) in std::env::vars() {
+        expanded = expanded.replace(&format!("%{key}%"), &value);
+    }
+    Ok(PathBuf::from(expanded))
 }
 
 pub fn exists(path: &Path) -> AdapterResult<bool> {
-    todo!()
+    Ok(path.exists())
 }
 
 pub fn is_directory(path: &Path) -> AdapterResult<bool> {
-    todo!()
+    Ok(path.is_dir())
 }
 
 pub fn create_dir_all(path: &Path) -> AdapterResult<()> {
