@@ -276,18 +276,10 @@ pub fn stage(repo: &Path, paths: &[PathBuf]) -> AdapterResult<()> {
         if !paths.iter().any(|requested| path.starts_with(requested)) {
             continue;
         }
-        let absolute = checked_path(workdir, &path)?;
-        if absolute.is_dir() {
-            continue;
-        }
-        if absolute.exists() || absolute.is_symlink() {
-            index.add_path(&path)?;
-        } else {
-            match index.remove_path(&path) {
-                Ok(()) => (),
-                Err(e) if e.code() == ErrorCode::NotFound => (),
-                Err(e) => return Err(e.into()),
-            }
+        match checked_path(workdir, &path)?.1 {
+            Some(metadata) if metadata.is_dir() => (),
+            Some(_) => index.add_path(&path)?,
+            None => index.remove_path(&path)?,
         }
     }
     index.write()?;
@@ -429,12 +421,25 @@ pub fn abort_merge(repo: &Path) -> AdapterResult<()> {
 }
 
 // Reject linked paths inside the working tree.
-fn checked_path(root: &Path, path: &Path) -> AdapterResult<PathBuf> {
+fn checked_path(root: &Path, path: &Path) -> AdapterResult<(PathBuf, Option<std::fs::Metadata>)> {
     relative(path)?;
     let mut absolute = root.to_path_buf();
+    let mut leaf = None;
     for component in path.components() {
         absolute.push(component);
-        if let Ok(metadata) = std::fs::symlink_metadata(&absolute) {
+        leaf = match std::fs::symlink_metadata(&absolute) {
+            Ok(metadata) => Some(metadata),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(metadata) = &leaf {
             #[cfg(windows)]
             {
                 use std::os::windows::fs::MetadataExt;
@@ -447,7 +452,7 @@ fn checked_path(root: &Path, path: &Path) -> AdapterResult<PathBuf> {
             }
         }
     }
-    Ok(absolute)
+    Ok((absolute, leaf))
 }
 
 /// Export a file or subtree to a new destination. Existing destinations are never overwritten.
@@ -546,7 +551,7 @@ fn resolve_contents(
     resolution: Resolution<'_>,
 ) -> AdapterResult<()> {
     let root = repo.workdir().ok_or_else(|| invalid("No working tree"))?;
-    let absolute = checked_path(root, path)?;
+    let (absolute, metadata) = checked_path(root, path)?;
     let expected = path
         .to_str()
         .ok_or_else(|| invalid("Non-UTF-8 path"))?
@@ -565,7 +570,7 @@ fn resolve_contents(
         .join("savehub-conflict-backups")
         .join(uuid::Uuid::new_v4().to_string());
     fs::create_dir_all(&backup)?;
-    if fs::exists(&absolute)? {
+    if metadata.is_some() {
         std::fs::copy(&absolute, backup.join("working-copy"))?;
     }
     fs::write_atomic(&backup.join("path"), expected.as_bytes())?;
@@ -577,8 +582,8 @@ fn resolve_contents(
         Resolution::Side(Some(mut entry)) => {
             let blob = blob.ok_or_else(|| invalid("Missing conflict blob"))?;
             fs::write_atomic(&absolute, blob.content())?;
-            index.add_path(path)?;
-            // Preserve the selected mode and object ID after clearing the conflict.
+            // Move conflict entries to resolve-undo and reuse the chosen blob and mode.
+            index.remove_path(path)?;
             entry.flags &= !0x3000;
             index.add(&entry)?;
         }
