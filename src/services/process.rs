@@ -21,6 +21,7 @@ impl ProcessService {
     /// Обновить список игр и события; при ошибке опроса сбросить состояние в неизвестное.
     pub fn refresh_running_games(&self) -> ServiceResult<Vec<GameProcessEvent>> {
         let events = self.runtime.set_running_games(Vec::new());
+        // TODO опрос OC/ привязка к ярлыку
         Ok(events)
     }
 
