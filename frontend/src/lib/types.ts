@@ -18,6 +18,32 @@ export interface Profile {
   lastPlayedGame: string | null
 }
 
+export interface Save {
+  id: string
+  gameId: string
+  profileId: string
+  createdAt: number
+  sizeBytes: number
+}
+
+export interface SaveChoice {
+  saveId: string
+  createSnapshot?: boolean
+}
+
+export interface SaveConflict {
+  id: string
+  gameId: string
+  local: Save
+  remote: Save
+}
+
+export type SaveConflictResolution =
+  | 'keepLocal'
+  | 'keepRemote'
+  | 'keepBothLocalFirst'
+  | 'keepBothRemoteFirst'
+
 export type SnapshotKind = 'beforeSwitch' | 'afterSession' | 'conflict' | 'beforeRestore'
 
 export interface Snapshot {

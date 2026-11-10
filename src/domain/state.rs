@@ -28,6 +28,24 @@ impl Catalog {
         inner.games.insert(game.id, game);
     }
 
+    pub fn update_game(&self, game: Game) -> bool {
+        let mut inner = self.inner.write().expect("Catalog lock poisoned");
+        if !inner.games.contains_key(&game.id) {
+            return false;
+        }
+        inner.games.insert(game.id, game);
+        true
+    }
+
+    pub fn remove_game(&self, game_id: GameId) -> bool {
+        self.inner
+            .write()
+            .expect("Catalog lock poisoned")
+            .games
+            .remove(&game_id)
+            .is_some()
+    }
+
     pub fn profiles(&self) -> HashMap<ProfileId, Profile> {
         let inner = self.inner.read().expect("Catalog lock poisoned");
         inner.profiles.clone()
@@ -37,6 +55,24 @@ impl Catalog {
     pub fn add_profile(&self, profile: Profile) {
         let mut inner = self.inner.write().expect("Catalog lock poisoned");
         inner.profiles.insert(profile.id.clone(), profile);
+    }
+
+    pub fn update_profile(&self, profile: Profile) -> bool {
+        let mut inner = self.inner.write().expect("Catalog lock poisoned");
+        if !inner.profiles.contains_key(&profile.id) {
+            return false;
+        }
+        inner.profiles.insert(profile.id.clone(), profile);
+        true
+    }
+
+    pub fn remove_profile(&self, profile_id: &str) -> bool {
+        self.inner
+            .write()
+            .expect("Catalog lock poisoned")
+            .profiles
+            .remove(profile_id)
+            .is_some()
     }
 }
 
@@ -238,6 +274,15 @@ impl Settings {
     pub fn add_game_resolution(&self, game_id: GameId, resolution: PathResolution) {
         let mut inner = self.inner.write().expect("Settings lock poisoned");
         inner.local.games.insert(game_id, resolution);
+    }
+
+    pub fn clear_game_resolution(&self, game_id: &GameId) {
+        self.inner
+            .write()
+            .expect("Settings lock poisoned")
+            .local
+            .games
+            .remove(game_id);
     }
 }
 

@@ -16,7 +16,6 @@ use tauri::{
 
 pub const MAIN_WINDOW: &str = "main";
 
-
 const TRAY_ID: &str = "main";
 const ID_SYNC: &str = "sync";
 const ID_SNAPSHOTS: &str = "snapshots";
@@ -108,7 +107,14 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     for profile in &view.profiles {
         let is_active = view.active_profile.as_deref() == Some(profile.as_str());
         let id = format!("{PROFILE_PREFIX}{profile}");
-        menu.append(&CheckMenuItem::with_id(app, id, profile, can_switch, is_active, None::<&str>)?)?;
+        menu.append(&CheckMenuItem::with_id(
+            app,
+            id,
+            profile,
+            can_switch,
+            is_active,
+            None::<&str>,
+        )?)?;
     }
     if let Some(game) = &view.running_game {
         let text = format!("Запущена {game}: переключение недоступно");
@@ -116,23 +122,54 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     }
 
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItem::with_id(app, ID_SYNC, "Синхронизировать сейчас", true, None::<&str>)?)?;
-    menu.append(&MenuItem::with_id(app, ID_SNAPSHOTS, "Снапшоты и откат…", true, None::<&str>)?)?;
-    menu.append(&MenuItem::with_id(app, ID_SETTINGS, "Настройки…", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        ID_SYNC,
+        "Синхронизировать сейчас",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        ID_SNAPSHOTS,
+        "Снапшоты и откат…",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        ID_SETTINGS,
+        "Настройки…",
+        true,
+        None::<&str>,
+    )?)?;
 
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    let status = MenuItem::new(app, sync_status(view.last_sync, SystemTime::now()), false, None::<&str>)?;
+    let status = MenuItem::new(
+        app,
+        sync_status(view.last_sync, SystemTime::now()),
+        false,
+        None::<&str>,
+    )?;
     menu.append(&status)?;
     *state.status_item.lock().unwrap() = Some(status);
 
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItem::with_id(app, ID_QUIT, "Выход", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        ID_QUIT,
+        "Выход",
+        true,
+        None::<&str>,
+    )?)?;
     Ok(menu)
 }
 
 /// Пересобрать меню после изменения состояния.
 fn refresh(app: &AppHandle) {
-    let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
     match build_menu(app) {
         Ok(menu) => {
             let _ = tray.set_menu(Some(menu));
@@ -225,17 +262,32 @@ mod tests {
 
     #[test]
     fn sync_status_formats_elapsed_time() {
-        assert_eq!(sync_status(None, SystemTime::now()), "○ Ещё не синхронизировано");
+        assert_eq!(
+            sync_status(None, SystemTime::now()),
+            "○ Ещё не синхронизировано"
+        );
         assert_eq!(status_after(5), "● Синхронизировано только что · GitHub");
-        assert_eq!(status_after(3 * 60 + 10), "● Синхронизировано 3 мин назад · GitHub");
-        assert_eq!(status_after(2 * 3600), "● Синхронизировано 2 ч назад · GitHub");
-        assert_eq!(status_after(3 * 86400), "● Синхронизировано больше суток назад · GitHub");
+        assert_eq!(
+            status_after(3 * 60 + 10),
+            "● Синхронизировано 3 мин назад · GitHub"
+        );
+        assert_eq!(
+            status_after(2 * 3600),
+            "● Синхронизировано 2 ч назад · GitHub"
+        );
+        assert_eq!(
+            status_after(3 * 86400),
+            "● Синхронизировано больше суток назад · GitHub"
+        );
     }
 
     #[test]
     fn sync_status_tolerates_clock_going_back() {
         let now = SystemTime::now();
         let future = now + Duration::from_secs(120);
-        assert_eq!(sync_status(Some(future), now), "● Синхронизировано только что · GitHub");
+        assert_eq!(
+            sync_status(Some(future), now),
+            "● Синхронизировано только что · GitHub"
+        );
     }
 }

@@ -95,7 +95,10 @@ pub fn list_conflicts() -> ApiResult<Vec<ConflictDto>> {
 
 /// TODO(backend): сценарий разрешения конфликта; после — `CONFLICTS_CHANGED` и `SNAPSHOTS_CHANGED`.
 #[tauri::command]
-pub async fn resolve_conflict(conflict_id: String, resolution: ConflictResolution) -> ApiResult<()> {
+pub async fn resolve_conflict(
+    conflict_id: String,
+    resolution: ConflictResolution,
+) -> ApiResult<()> {
     let _ = (conflict_id, resolution);
     Err(ApiError::NotImplemented("resolve_conflict"))
 }
