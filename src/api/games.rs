@@ -4,8 +4,8 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::State;
 
-use super::{ApiError, ApiResult};
-use crate::domain::{Game, GameAvailability, GameId};
+use super::ApiResult;
+use crate::domain::{Game, GameAvailability, GameId, GamePaths};
 use crate::services::game::GameService;
 
 #[derive(Debug, Serialize)]
@@ -27,11 +27,10 @@ pub enum GameStatus {
 
 #[tauri::command]
 pub fn get_game_status(
-    game: String,
+    game_id: GameId,
     service: State<'_, Arc<GameService>>,
 ) -> ApiResult<GameStatus> {
-    let id = parse_game_id(&game)?;
-    let game = service.get(id)?;
+    let game = service.get(game_id)?;
     status_for(&game, &service)
 }
 
@@ -44,25 +43,35 @@ pub fn list_games(service: State<'_, Arc<GameService>>) -> ApiResult<Vec<GameDto
         .collect()
 }
 
-/// TODO: IPC currently provides only a save path, while GameService requires
-/// both save and executable paths. Keep this explicit until the contract grows.
+//TODO нужен ui под путь для ярлыка
 #[tauri::command]
-pub fn add_game(name: String, save_path: String) -> ApiResult<GameDto> {
-    let _ = (name, save_path);
-    Err(ApiError::NotImplemented("add_game"))
+pub fn add_game(name: String, save_path: String,service: State<'_, Arc<GameService>>) -> ApiResult<GameDto> {
+    let game = service.add(
+        &name,
+        GamePaths {
+            save_dir_path: save_path.clone(),
+            exe_path: save_path, // TODO после внедрения ярлыков это заменится на путь до него, пока заглушка
+        },
+        Vec::new(),
+    )?;
+
+    to_dto(&game, &service)
 }
 
-/// TODO: resolve_paths also needs the executable path or an explicit resolution.
+//TODO нужен ui для изменения данных игры (имя, два пути)
 #[tauri::command]
-pub fn set_game_save_path(game_id: String, save_path: String) -> ApiResult<()> {
-    let _ = (game_id, save_path);
-    Err(ApiError::NotImplemented("set_game_save_path"))
-}
+pub fn update_game(game_id: GameId, name: String, save_path: String, service: State<'_, Arc<GameService>>) -> ApiResult<GameDto> {
+    let game = service.update(
+        game_id,
+        &name,
+        GamePaths {
+            save_dir_path: save_path.clone(),
+            exe_path: save_path, // TODO после внедрения ярлыков это заменится на путь до него, пока заглушка
+        },
+        Vec::new(),
+    )?;
 
-fn parse_game_id(value: &str) -> ApiResult<GameId> {
-    value
-        .parse()
-        .map_err(|_| ApiError::Rejected(format!("Некорректный идентификатор игры: {value}")))
+    to_dto(&game, &service)
 }
 
 fn to_dto(game: &Game, service: &GameService) -> ApiResult<GameDto> {

@@ -66,7 +66,7 @@ impl Catalog {
         true
     }
 
-    pub fn remove_profile(&self, profile_id: &str) -> bool {
+    pub fn remove_profile(&self, profile_id: &ProfileId) -> bool {
         self.inner
             .write()
             .expect("Catalog lock poisoned")
@@ -311,7 +311,7 @@ mod tests {
 
     fn runtime() -> RuntimeState {
         RuntimeState::new(
-            Some("a".into()),
+            Some(uuid::Uuid::from_u128(1)),
             Vec::new(),
             SyncStatus {
                 state: SyncState::Idle,
@@ -364,6 +364,7 @@ mod tests {
     #[test]
     fn process_updates_emit_each_transition_once() {
         let runtime = runtime();
+        let next_profile = uuid::Uuid::from_u128(2);
         let game = uuid::Uuid::new_v4();
         thread::scope(|scope| {
             let one = scope.spawn(|| runtime.set_running_games(vec![game, game]));
@@ -378,36 +379,37 @@ mod tests {
             assert!(matches!(events[0], GameProcessEvent::Started(id) if id == game));
         });
         assert_eq!(
-            runtime.set_active_profile(Some("b".into())),
+            runtime.set_active_profile(Some(next_profile)),
             Err(ProfileActivationError::GamesRunning(vec![game]))
         );
         assert_eq!(
             runtime.profile_and_running_games(),
-            (Some("a".into()), Some(vec![game]))
+            (Some(uuid::Uuid::from_u128(1)), Some(vec![game]))
         );
         let events = runtime.set_running_games(vec![]);
         assert!(matches!(events.as_slice(), [GameProcessEvent::Stopped(id)] if *id == game));
-        runtime.set_active_profile(Some("b".into())).unwrap();
+        runtime.set_active_profile(Some(next_profile)).unwrap();
         assert_eq!(
             runtime.profile_and_running_games(),
-            (Some("b".into()), Some(vec![]))
+            (Some(next_profile), Some(vec![]))
         );
     }
     #[test]
     fn unverified_processes_block_profile_activation() {
         let runtime = runtime();
+        let next_profile = uuid::Uuid::from_u128(2);
         assert_eq!(runtime.running_games(), None);
         assert_eq!(
-            runtime.set_active_profile(Some("b".into())),
+            runtime.set_active_profile(Some(next_profile)),
             Err(ProfileActivationError::ProcessesUnknown)
         );
         runtime.set_running_games(vec![]);
-        runtime.set_active_profile(Some("b".into())).unwrap();
+        runtime.set_active_profile(Some(next_profile)).unwrap();
         runtime.invalidate_process_state();
         assert_eq!(
-            runtime.set_active_profile(Some("a".into())),
+            runtime.set_active_profile(Some(uuid::Uuid::from_u128(1))),
             Err(ProfileActivationError::ProcessesUnknown)
         );
-        assert_eq!(runtime.active_profile(), Some("b".into()));
+        assert_eq!(runtime.active_profile(), Some(next_profile));
     }
 }

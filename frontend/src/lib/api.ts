@@ -67,10 +67,11 @@ export const api = {
   installUpdate: () => call<void>('install_update'),
   // src/api/games.rs
   listGames: () => call<Game[]>('list_games'),
-  getGameStatus: (game: string) => call<Game['status']>('get_game_status', { game }),
+  getGameStatus: (gameId: string) =>
+    call<Game['status']>('get_game_status', { gameId }),
   addGame: (name: string, savePath: string) => call<Game>('add_game', { name, savePath }),
-  setGameSavePath: (gameId: string, savePath: string) =>
-    call<void>('set_game_save_path', { gameId, savePath }),
+  updateGame: (gameId: string, name: string, savePath: string) =>
+      call<Game>('update_game', { gameId, name, savePath }),
 
   // src/api/profiles.rs
   listProfiles: () => call<Profile[]>('list_profiles'),

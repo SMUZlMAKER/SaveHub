@@ -2,7 +2,7 @@ use super::{GameId, PathResolution};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
-pub type ProfileId = String;
+pub type ProfileId = uuid::Uuid;
 pub type SnapshotId = String;
 pub type ConflictId = String;
 pub type CommitId = String;

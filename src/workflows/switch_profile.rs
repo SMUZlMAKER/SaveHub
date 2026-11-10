@@ -4,6 +4,7 @@ use crate::services::{
     ServiceResult, game::GameService, process::ProcessService, profile::ProfileService,
     repo::RepoService, save::SaveService,
 };
+use crate::domain::ProfileId;
 
 pub struct SwitchProfile {
     games: Arc<GameService>,
@@ -36,11 +37,11 @@ impl SwitchProfile {
 
     /// Захватить operations на весь сценарий; затем перепроверить профиль и процессы.
     /// Не захватывать operations повторно и не держать локи хранилищ во время I/O.
-    pub fn execute(&self, profile_id: &str) -> ServiceResult<()> {
+    pub fn execute(&self, profile_id: &ProfileId) -> ServiceResult<()> {
         let _guard = self.operations.lock().map_err(|_| {
             crate::services::ServiceError::Conflict("Операция уже выполняется".into())
         })?;
-        let _ = self.profiles.get(profile_id)?;
+        let profile = self.profiles.get(profile_id)?;
         self.processes.refresh_running_games()?;
         if let Some(games) = self.processes.running_games() {
             if !games.is_empty() {
@@ -51,12 +52,12 @@ impl SwitchProfile {
         for game in self.games.list()? {
             self.saves.create_snapshot(
                 game.id,
-                profile_id,// TODO заменить на текущий профиль, вместо нового
+                &profile_id.to_string(),// TODO заменить на текущий профиль, вместо нового
                 crate::domain::SnapshotKind::BeforeSwitch,
             )?;
-            self.saves.bind(game.id, profile_id)?;
+            self.saves.bind(game.id, &profile_id.to_string())?;
         }
-        self.repo.checkout_profile(profile_id)?;
+        self.repo.checkout_profile(&profile.branch)?;
         self.profiles.set_active(profile_id)
     }
 }

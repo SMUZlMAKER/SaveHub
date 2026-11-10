@@ -1,5 +1,5 @@
 //! Экран «Снапшоты»: копии сохранений, к которым можно откатиться.
-
+// TODO UI в тг отписал
 use serde::Serialize;
 
 use super::{ApiError, ApiResult, stub};
