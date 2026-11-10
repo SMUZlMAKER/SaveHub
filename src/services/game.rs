@@ -88,6 +88,7 @@ impl GameService {
             return Err(ServiceError::NotFound("Игра не найдена".into()));
         }
         self.settings.add_game_resolution(game_id, resolution);
+        // TODO локальный конфиг не сохраняется
         Ok(())
     }
 

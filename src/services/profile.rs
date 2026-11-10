@@ -38,6 +38,7 @@ impl ProfileService {
 
     /// Создать профиль и его ветку; каталог игр общий.
     pub fn create(&self, name: &str) -> ServiceResult<Profile> {
+        //TODO русские имена дают пустой id, id местами uuid, местами str
         if name.trim().is_empty() {
             return Err(ServiceError::InvalidInput(
                 "Имя профиля не может быть пустым".into(),

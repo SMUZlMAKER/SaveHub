@@ -51,7 +51,7 @@ impl SwitchProfile {
         for game in self.games.list()? {
             self.saves.create_snapshot(
                 game.id,
-                profile_id,
+                profile_id,// TODO заменить на текущий профиль, вместо нового
                 crate::domain::SnapshotKind::BeforeSwitch,
             )?;
             self.saves.bind(game.id, profile_id)?;

@@ -12,7 +12,7 @@ impl SettingsService {
         Self { settings, path }
     }
 
-    fn persist(&self) -> ServiceResult<()> {
+    fn persist(&self) -> ServiceResult<()> { //TODO  Изменение настроек и сохранение не сериализованы: возможна перезапись свежих данных старой версией; при ошибке записи память уже изменена. `src/services/settings.rs:15`.
         crate::adapters::config::write_settings(&self.path, &self.settings.data())
             .map_err(ServiceError::Adapter)
     }
