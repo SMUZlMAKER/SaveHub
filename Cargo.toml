@@ -3,6 +3,9 @@ name = "savehub"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
 junction = "2.1.0"
 tauri = "2.12.5"

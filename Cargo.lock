@@ -2478,6 +2478,7 @@ version = "0.1.0"
 dependencies = [
  "junction",
  "tauri",
+ "tauri-build",
 ]
 
 [[package]]

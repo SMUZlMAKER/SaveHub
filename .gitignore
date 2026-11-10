@@ -2,3 +2,6 @@ target/
 .vscode/
 
 *.link
+
+# сгенерированные tauri-build JSON-схемы
+/gen/schemas

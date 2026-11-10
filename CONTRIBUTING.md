@@ -16,6 +16,19 @@ cargo build
 ./target/debug/savehub
 ```
 
+## Про фронтенд (Tauri + Svelte)
+
+Фронтенд лежит во `frontend/`: Svelte 5 + TypeScript + Vite. Конфиг Tauri — `tauri.conf.json` в корне репозитория.
+
+Нужны Rust (toolchain `msvc` на Windows), Node.js и WebView2 (в Windows 10/11 уже есть).
+
+```bash
+cd frontend
+npm install
+npm run tauri dev     # vite dev-сервер + rust-приложение с hot reload фронта
+npm run tauri build   # релизная сборка и инсталлятор
+```
+
 ## Архитектура, дизайн
 
 Структура проекта
