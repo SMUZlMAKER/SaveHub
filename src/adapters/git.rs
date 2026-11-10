@@ -618,6 +618,9 @@ mod tests {
             let mut config = repo.config().unwrap();
             config.set_str("user.name", "SaveHub Test").unwrap();
             config.set_str("user.email", "test@localhost").unwrap();
+            // Checkout assertions compare fixture bytes, including line endings.
+            config.set_bool("core.autocrlf", false).unwrap();
+            config.set_str("core.eol", "lf").unwrap();
             path
         }
     }
