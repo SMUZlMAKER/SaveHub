@@ -15,3 +15,4 @@ pub mod profile;
 pub mod repo;
 pub mod save;
 pub mod settings;
+pub mod updates;

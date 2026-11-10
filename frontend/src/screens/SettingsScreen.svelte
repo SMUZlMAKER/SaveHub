@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AppUpdates from '../lib/components/AppUpdates.svelte'
   import { onMount } from 'svelte'
   import { api, describeError } from '../lib/api'
   import { notice } from '../lib/notice.svelte'
@@ -58,6 +59,8 @@
 </script>
 
 <h2>Настройки</h2>
+
+<AppUpdates />
 
 <Loadable {loading} error={loadError}>
   {#if settings}

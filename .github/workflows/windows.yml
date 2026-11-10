@@ -65,6 +65,8 @@ jobs:
     needs: source
     runs-on: windows-2022
     timeout-minutes: 45
+    env:
+      SAVEHUB_UPDATER_PUBLIC_KEY: ${{ vars.SAVEHUB_UPDATER_PUBLIC_KEY }}
     permissions:
       contents: read
     steps:
@@ -105,8 +107,23 @@ jobs:
         run: npm run build
       - name: Run Rust unit and documentation tests
         run: cargo test --release --locked
-      - name: Build release application and installer
-        if: needs.source.outputs.publish == 'true'
+      # Signing secrets are available only to a manual stable release from main.
+      # PR and branch code never receives the private key.
+      - name: Build signed stable installer
+        if: needs.source.outputs.publish == 'true' && needs.source.outputs.prerelease == 'false'
+        working-directory: frontend
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if (!$env:SAVEHUB_UPDATER_PUBLIC_KEY -or !$env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw 'Configure SAVEHUB_UPDATER_PUBLIC_KEY variable and TAURI_SIGNING_PRIVATE_KEY secret before releasing.'
+          }
+          npm run tauri -- build --bundles nsis --ci --config tauri.updater.conf.json -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build preview installer
+        if: needs.source.outputs.publish == 'true' && needs.source.outputs.prerelease == 'true'
         working-directory: frontend
         run: npm run tauri -- build --bundles nsis --ci -- --locked
       - name: Build application without installer
@@ -118,12 +135,17 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: windows-x64-installer
-          path: target/release/bundle/nsis/*-setup.exe
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/nsis/*-setup.exe.sig
           if-no-files-found: error
           retention-days: 14
 
   release:
     name: Publish GitHub release
+    concurrency:
+      group: savehub-release-publication
+      cancel-in-progress: false
     needs: [source, build]
     if: needs.source.outputs.publish == 'true'
     runs-on: ubuntu-latest
@@ -151,6 +173,24 @@ jobs:
             const files = (await fs.readdir('installer')).filter(name => name.endsWith('-setup.exe'));
             if (files.length !== 1) throw new Error('Expected exactly one Windows installer.');
             const name = files[0];
+            const version = /^SaveHub_(\d+\.\d+\.\d+)_x64-setup\.exe$/.exec(name)?.[1];
+            if (!version) throw new Error('Stable numeric application version expected in installer filename.');
+            let signature;
+            if (!prerelease) {
+              signature = (await fs.readFile(`installer/${name}.sig`, 'utf8')).trim();
+              if (!signature) throw new Error('Missing updater signature.');
+              // Prevent a release with the same/older application version replacing Latest.
+              let previous;
+              try { previous = (await github.rest.repos.getLatestRelease(context.repo)).data; }
+              catch (error) { if (error.status !== 404) throw error; }
+              const previousName = previous?.assets.find(a => /^SaveHub_\d+\.\d+\.\d+_x64-setup\.exe$/.test(a.name))?.name;
+              if (previousName) {
+                const old = previousName.match(/_(\d+\.\d+\.\d+)_/)[1].split('.').map(Number);
+                const next = version.split('.').map(Number);
+                const first = next.findIndex((n, i) => n !== old[i]);
+                if (first < 0 || next[first] < old[first]) throw new Error('Increase Cargo.toml and tauri.conf.json versions before a stable release.');
+              }
+            }
             const data = await fs.readFile(`installer/${name}`);
             const checksum = crypto.createHash('sha256').update(data).digest('hex');
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
@@ -168,6 +208,22 @@ jobs:
               ...context.repo, release_id: release.id, name, data,
               headers: { 'content-type': 'application/octet-stream' },
             });
+            if (!prerelease) {
+              const base = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/releases/download/${tag}`;
+              const manifest = {
+                version, notes: `SaveHub ${version}`, pub_date: new Date().toISOString(),
+                platforms: { 'windows-x86_64': { signature, url: `${base}/${encodeURIComponent(name)}` } },
+              };
+              for (const [assetName, assetData] of [
+                [`${name}.sig`, Buffer.from(signature)],
+                ['latest.json', Buffer.from(JSON.stringify(manifest, null, 2))],
+              ]) {
+                await github.rest.repos.uploadReleaseAsset({
+                  ...context.repo, release_id: release.id, name: assetName, data: assetData,
+                  headers: { 'content-type': 'application/octet-stream' },
+                });
+              }
+            }
             const { data: published } = await github.rest.repos.updateRelease({
               ...context.repo, release_id: release.id, draft: false,
               make_latest: prerelease ? 'false' : 'true',

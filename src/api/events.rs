@@ -13,3 +13,6 @@ pub const SYNC_STATUS_CHANGED: &str = "sync-status-changed";
 pub const CONFLICTS_CHANGED: &str = "conflicts-changed";
 /// Открыть в окне конкретный экран. Payload — id экрана: "games", "profiles", "snapshots", "settings", "conflicts".
 pub const NAVIGATE: &str = "navigate";
+
+/// Payload — UpdateStatus: состояние проверки или установки обновления.
+pub const UPDATE_STATUS_CHANGED: &str = "update-status-changed";
