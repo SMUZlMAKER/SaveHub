@@ -26,7 +26,7 @@ jobs:
       publish: ${{ steps.source.outputs.publish }}
       prerelease: ${{ steps.source.outputs.prerelease }}
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v8
         id: source
         with:
           script: |
@@ -68,11 +68,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.source.outputs.sha }}
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: npm
@@ -81,7 +81,9 @@ jobs:
         run: rustup default stable-x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # PR caches are scoped to the PR; comment-triggered builds run in main's
+          # cache scope, so they must not save artifacts compiled from PR code there.
+          save-if: ${{ github.event_name != 'issue_comment' }}
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
@@ -102,7 +104,7 @@ jobs:
         working-directory: frontend
         run: npm run build
       - name: Run Rust unit and documentation tests
-        run: cargo test --locked
+        run: cargo test --release --locked
       - name: Build release application and installer
         if: needs.source.outputs.publish == 'true'
         working-directory: frontend
@@ -113,7 +115,7 @@ jobs:
         run: npm run tauri -- build --no-bundle --ci -- --locked
       - name: Upload Windows installer
         if: needs.source.outputs.publish == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: windows-x64-installer
           path: target/release/bundle/nsis/*-setup.exe
@@ -131,12 +133,12 @@ jobs:
       contents: write
     steps:
       # Never check out or execute PR code in the job with write permissions.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: windows-x64-installer
           path: installer
       - name: Publish installer
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
           PRERELEASE: ${{ needs.source.outputs.prerelease }}
