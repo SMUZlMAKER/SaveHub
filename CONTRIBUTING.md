@@ -29,6 +29,30 @@ npm run tauri dev     # vite dev-сервер + rust-приложение с hot
 npm run tauri build   # релизная сборка и инсталлятор
 ```
 
+### Контракт фронт ↔ бэк
+
+Фронт уже вызывает все ручки, которые нужны экранам. Пока бэкенда нет, ручки в `src/api/` — заглушки:
+чтение отдает демо-данные, действия возвращают `ApiError::NotImplemented` (фронт покажет «Бэкенд пока не умеет: …»).
+Где что подключать — помечено `TODO(backend)`. В `tauri dev` внизу каждого экрана видно, какие ручки он вызывает.
+
+Правила:
+
+- ручка — `#[tauri::command]` в `src/api/<экран>.rs`, регистрируется в `app::start` (`generate_handler!`);
+- ручка тонкая: вызывает сервис или сценарий, переводит доменные структуры в DTO;
+- DTO — структуры с `#[serde(rename_all = "camelCase")]` рядом с ручкой; их TS-двойники — во `frontend/src/lib/types.ts`, менять вместе;
+- ошибки — `ApiError`: `NotImplemented`, `Rejected` (текст покажется пользователю как есть, например «Идёт игра, переключение недоступно»), `Internal`;
+- долгие ручки (git, копирование сохранений) — `async fn`: синхронные ручки Tauri выполняет в главном потоке, окно зависнет;
+- когда данные меняются не по запросу фронта (RepoWorker, запуск игры, трей) — шлем событие из `src/api/events.rs` (`app_handle.emit(...)`), фронт перезапросит данные.
+
+| Экран | Ручки | Что подключить |
+| --- | --- | --- |
+| Игры | `list_games`, `add_game`, `set_game_save_path` | GameService, RuntimeState (запущенные игры) |
+| Профили | `list_profiles`, `switch_profile`, `create_profile`, `delete_profile` | ProfileService, workflows::SwitchProfile |
+| Снапшоты | `list_snapshots`, `restore_snapshot` | SaveService / снапшоты, сценарий отката |
+| Настройки | `get_settings`, `update_settings`, `set_github_token` | хранилище Settings, системное хранилище токена |
+| Шапка, трей | `get_sync_status`, `sync_now` | RepoWorker |
+| Конфликты | `list_conflicts`, `resolve_conflict` | RepoWorker, сценарий разрешения конфликта |
+
 ## Архитектура, дизайн
 
 Структура проекта

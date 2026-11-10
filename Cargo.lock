@@ -2477,6 +2477,8 @@ name = "savehub"
 version = "0.1.0"
 dependencies = [
  "junction",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
 ]
