@@ -4,3 +4,4 @@
 // 2. Запустить RepoWorker (отдельный поток)
 // 3. Запустить Tauri, указав статику и все нужные Rust-хуки
 pub mod app;
+pub mod tray;
