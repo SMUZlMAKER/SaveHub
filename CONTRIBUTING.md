@@ -91,7 +91,8 @@ Workflow `.github/workflows/windows.yml` собирает Windows x64:
 Для локальной сборки с подписью задайте те же переменные окружения и из `frontend/` выполните:
 
 ```powershell
-npm run tauri -- build --bundles nsis --config tauri.updater.conf.json -- --locked
+node ../.github/scripts/prepare-updater.mjs
+npm run tauri -- build --bundles nsis --config target/updater/tauri.updater.conf.json -- --locked
 ```
 
 ## Работа с кодом
