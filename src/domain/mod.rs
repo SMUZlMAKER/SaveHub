@@ -1,2 +1,6 @@
-// TODO: здесь все, относящееся к доменной области: структуры игр, профилей, прочего
 pub mod game;
+pub mod model;
+pub mod state;
+pub use game::*;
+pub use model::*;
+pub use state::*;

@@ -1,3 +1,16 @@
-// TODO: здесь низкоуровневые модули для работы с fs, процессами, git.
-// Иначе говоря - базовые операции. Правило простое: если в других частях потребовалась низкоуровневая логика ("сделать коммит") - реализация несется сюда.
-// Бизнес-логики здесь быть не должно
+pub type AdapterResult<T> = Result<T, AdapterError>;
+
+#[derive(Debug)]
+pub enum AdapterError {
+    Io(std::io::Error),
+    InvalidData(String),
+    FileLocked(std::path::PathBuf),
+    Git(String),
+    Credentials(String),
+    UnsupportedPlatform,
+}
+pub mod config;
+pub mod fs;
+pub mod git;
+pub mod process;
+pub mod watcher;
