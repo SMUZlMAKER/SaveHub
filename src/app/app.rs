@@ -38,13 +38,13 @@ pub fn start() {
         ])
         .setup(|app| {
             tray::setup(app.handle())?;
-            app.manage(crate::services::updates::Updates::load(app.handle())?);
+            app.manage(crate::app::updates::Updates::load(app.handle())?);
             if !std::env::args().any(|arg| arg == "--autostart") {
                 if let Some(window) = app.get_webview_window("main") {
                     window.show()?;
                 }
             }
-            crate::services::updates::spawn(app.handle().clone());
+            crate::background::updates::spawn(app.handle().clone());
             Ok(())
         })
         // Приложение живет в трее: крестик прячет окно, а не завершает процесс

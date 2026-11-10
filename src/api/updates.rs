@@ -1,8 +1,39 @@
-use crate::{
-    api::ApiResult,
-    services::updates::{AppPreferences, Preferences, UpdateStatus, Updates},
-};
+//! Команды и DTO экрана обновлений.
+use crate::{api::ApiResult, app::updates::Updates};
+use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Preferences {
+    pub check_on_startup: bool,
+    pub check_periodically: bool,
+}
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            check_on_startup: true,
+            check_periodically: true,
+        }
+    }
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatus {
+    pub current_version: String,
+    pub configured: bool,
+    pub phase: String,
+    pub version: Option<String>,
+    pub notes: Option<String>,
+    pub last_checked_at: Option<u64>,
+    pub error: Option<String>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPreferences {
+    pub launch_at_login: bool,
+    pub check_on_startup: bool,
+    pub check_periodically: bool,
+}
 #[tauri::command]
 pub async fn get_app_preferences(
     app: tauri::AppHandle,

@@ -1,50 +1,20 @@
-//! Настройки обновления отделены от ещё не реализованного каталога сохранений.
+//! Состояние обновлений и интеграция с плагинами Tauri.
+#[cfg(windows)]
 use crate::adapters::autostart;
-use serde::{Deserialize, Serialize};
+use crate::api::updates::{AppPreferences, Preferences, UpdateStatus};
 use std::{
     path::PathBuf,
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{Emitter, Manager};
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::api::{ApiError, ApiResult};
 const ENDPOINT: &str = "https://github.com/SMUZlMAKER/SaveHub/releases/latest/download/latest.json";
 const PUBLIC_KEY: Option<&str> = option_env!("SAVEHUB_UPDATER_PUBLIC_KEY");
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct Preferences {
-    pub check_on_startup: bool,
-    pub check_periodically: bool,
-}
-impl Default for Preferences {
-    fn default() -> Self {
-        Self {
-            check_on_startup: true,
-            check_periodically: true,
-        }
-    }
-}
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateStatus {
-    pub current_version: String,
-    pub configured: bool,
-    pub phase: String,
-    pub version: Option<String>,
-    pub notes: Option<String>,
-    pub last_checked_at: Option<u64>,
-    pub error: Option<String>,
-}
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppPreferences {
-    pub launch_at_login: bool,
-    pub check_on_startup: bool,
-    pub check_periodically: bool,
-}
 pub struct Updates {
     preferences: Mutex<Preferences>,
     path: PathBuf,
@@ -56,6 +26,10 @@ fn internal(e: impl std::fmt::Display) -> ApiError {
     ApiError::Internal(e.to_string())
 }
 impl Updates {
+    pub fn check_preferences(&self) -> Preferences {
+        self.preferences.lock().unwrap().clone()
+    }
+
     pub fn load(app: &tauri::AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
         let path = app.path().app_config_dir()?.join("updates.json");
         let preferences = match std::fs::read(&path) {
@@ -88,15 +62,15 @@ impl Updates {
     pub fn preferences(&self, app: &tauri::AppHandle) -> ApiResult<AppPreferences> {
         let p = self.preferences.lock().unwrap();
         Ok(AppPreferences {
-            launch_at_login: autostart::is_enabled(app).map_err(internal)?,
+            launch_at_login: app.autolaunch().is_enabled().map_err(internal)?,
             check_on_startup: p.check_on_startup,
             check_periodically: p.check_periodically,
         })
     }
     pub fn save(&self, app: &tauri::AppHandle, p: Preferences, launch: bool) -> ApiResult<()> {
         let mut current = self.preferences.lock().unwrap();
-        let previous = autostart::is_enabled(app).map_err(internal)?;
-        autostart::set_enabled(app, launch).map_err(internal)?;
+        let previous = app.autolaunch().is_enabled().map_err(internal)?;
+        set_autostart(app, launch).map_err(internal)?;
         let result = (|| -> std::io::Result<()> {
             std::fs::create_dir_all(self.path.parent().unwrap())?;
             let temporary = self.path.with_extension("json.tmp");
@@ -104,7 +78,7 @@ impl Updates {
             std::fs::rename(temporary, &self.path)
         })();
         if let Err(e) = result {
-            let _ = autostart::set_enabled(app, previous);
+            let _ = set_autostart(app, previous);
             return Err(internal(e));
         }
         *current = p;
@@ -195,23 +169,6 @@ impl Updates {
     }
 }
 
-pub fn spawn(app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<Updates>();
-        let startup = state.preferences.lock().unwrap().check_on_startup;
-        if startup && state.status().configured {
-            let _ = state.check(&app).await;
-        }
-        loop {
-            tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
-            let enabled = state.preferences.lock().unwrap().check_periodically;
-            if enabled && state.status().configured {
-                let _ = state.check(&app).await;
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +183,23 @@ mod tests {
         let restored: Preferences =
             serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
         assert!(!restored.check_on_startup && restored.check_periodically);
+    }
+}
+
+fn set_autostart(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _ = app;
+        autostart::set_enabled(enabled)
+    }
+    #[cfg(not(windows))]
+    {
+        let manager = app.autolaunch();
+        if enabled {
+            manager.enable()
+        } else {
+            manager.disable()
+        }
+        .map_err(|e| e.to_string())
     }
 }
