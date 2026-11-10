@@ -8,6 +8,7 @@ pub mod error;
 pub mod events;
 pub mod games;
 pub mod profiles;
+pub mod saves;
 pub mod settings;
 pub mod snapshots;
 pub mod sync;

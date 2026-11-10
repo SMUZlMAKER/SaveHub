@@ -1,4 +1,5 @@
 use super::{GameId, PathResolution};
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
 pub type ProfileId = String;
@@ -6,7 +7,7 @@ pub type SnapshotId = String;
 pub type ConflictId = String;
 pub type CommitId = String;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub id: ProfileId,
     pub name: String,
@@ -14,7 +15,7 @@ pub struct Profile {
     pub last_played_game: Option<GameId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsData {
     pub repo_url: Option<String>,
     pub local_repo_path: Option<PathBuf>,
@@ -25,14 +26,14 @@ pub struct SettingsData {
 }
 
 /// Локальный файл вне Git-репозитория сохранений; ключ — UUID игры, не профиль.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalConfig {
     pub machine_id: String,
     /// В том числе запоминает выбор UpdateRepository.
     pub games: HashMap<GameId, PathResolution>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SnapshotKind {
     BeforeSwitch,
     AfterSession,
@@ -41,7 +42,7 @@ pub enum SnapshotKind {
     FileChanged,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub id: SnapshotId,
     pub game_id: GameId,
@@ -52,14 +53,14 @@ pub struct Snapshot {
     pub size_bytes: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveVersion {
     pub machine_id: String,
     pub modified_at: u64,
     pub size_bytes: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conflict {
     pub id: ConflictId,
     pub game_id: GameId,

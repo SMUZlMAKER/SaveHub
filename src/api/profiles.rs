@@ -1,8 +1,13 @@
 //! Экран «Профили» и переключение профиля (оно же есть в трее).
 
 use serde::Serialize;
+use std::sync::Arc;
+use tauri::{Emitter, State};
 
 use super::{ApiError, ApiResult};
+use crate::api::events::PROFILE_CHANGED;
+use crate::domain::Profile;
+use crate::services::profile::ProfileService;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,25 +20,24 @@ pub struct ProfileDto {
     pub last_played_game: Option<String>,
 }
 
-/// TODO(backend): ProfileService::list.
+/// GET /me
 #[tauri::command]
-pub fn list_profiles() -> ApiResult<Vec<ProfileDto>> {
-    Ok(vec![
-        ProfileDto {
-            id: "main".into(),
-            name: "Основной".into(),
-            is_active: true,
-            games_count: 3,
-            last_played_game: Some("Hollow Knight".into()),
-        },
-        ProfileDto {
-            id: "guest".into(),
-            name: "Гость".into(),
-            is_active: false,
-            games_count: 0,
-            last_played_game: None,
-        },
-    ])
+pub fn current_profile(service: State<'_, Arc<ProfileService>>) -> ApiResult<ProfileDto> {
+    service
+        .active()?
+        .as_ref()
+        .map(|profile| to_dto(profile, true))
+        .ok_or_else(|| ApiError::Internal("Активный профиль не настроен".into()))
+}
+
+#[tauri::command]
+pub fn list_profiles(service: State<'_, Arc<ProfileService>>) -> ApiResult<Vec<ProfileDto>> {
+    let active_id = service.active()?.map(|profile| profile.id);
+    Ok(service
+        .list()?
+        .into_iter()
+        .map(|profile| to_dto(&profile, active_id.as_deref() == Some(profile.id.as_str())))
+        .collect())
 }
 
 /// Переключить сохранения всех игр на профиль. Операция долгая, поэтому `async` — не блокирует окно.
@@ -47,14 +51,36 @@ pub async fn switch_profile(profile_id: String) -> ApiResult<()> {
 
 /// TODO(backend): ProfileService::create.
 #[tauri::command]
-pub fn create_profile(name: String) -> ApiResult<ProfileDto> {
-    let _ = name;
-    Err(ApiError::NotImplemented("create_profile"))
+pub fn create_profile(
+    app: tauri::AppHandle,
+    name: String,
+    service: State<'_, Arc<ProfileService>>,
+) -> ApiResult<ProfileDto> {
+    let profile = service.create(&name)?;
+    app.emit(PROFILE_CHANGED, ())
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    Ok(to_dto(&profile, false))
 }
 
 /// TODO(backend): ProfileService::delete. Активный профиль удалять нельзя — `ApiError::Rejected`.
 #[tauri::command]
-pub fn delete_profile(profile_id: String) -> ApiResult<()> {
-    let _ = profile_id;
-    Err(ApiError::NotImplemented("delete_profile"))
+pub fn delete_profile(
+    app: tauri::AppHandle,
+    profile_id: String,
+    service: State<'_, Arc<ProfileService>>,
+) -> ApiResult<()> {
+    service.delete(&profile_id)?;
+    app.emit(PROFILE_CHANGED, ())
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    Ok(())
+}
+
+fn to_dto(profile: &Profile, is_active: bool) -> ProfileDto {
+    ProfileDto {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        is_active,
+        games_count: 0,
+        last_played_game: profile.last_played_game.as_ref().map(ToString::to_string),
+    }
 }

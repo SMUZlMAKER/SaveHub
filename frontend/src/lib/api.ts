@@ -11,6 +11,10 @@ import type {
   ConflictResolution,
   Game,
   Profile,
+  Save,
+  SaveChoice,
+  SaveConflict,
+  SaveConflictResolution,
   Settings,
   Snapshot,
   SyncStatus,
@@ -62,15 +66,25 @@ export const api = {
   installUpdate: () => call<void>('install_update'),
   // src/api/games.rs
   listGames: () => call<Game[]>('list_games'),
+  getGameStatus: (game: string) => call<Game['status']>('get_game_status', { game }),
   addGame: (name: string, savePath: string) => call<Game>('add_game', { name, savePath }),
   setGameSavePath: (gameId: string, savePath: string) =>
     call<void>('set_game_save_path', { gameId, savePath }),
 
   // src/api/profiles.rs
   listProfiles: () => call<Profile[]>('list_profiles'),
+  currentProfile: () => call<Profile>('current_profile'),
   switchProfile: (profileId: string) => call<void>('switch_profile', { profileId }),
   createProfile: (name: string) => call<Profile>('create_profile', { name }),
   deleteProfile: (profileId: string) => call<void>('delete_profile', { profileId }),
+
+  // src/api/saves.rs
+  listSaves: (game: string) => call<Save[]>('list_saves', { game }),
+  chooseSave: (game: string, choice: SaveChoice) =>
+    call<void>('choose_save', { game, choice }),
+  getSaveConflict: (game: string) => call<SaveConflict | null>('get_save_conflict', { game }),
+  resolveSaveConflict: (game: string, conflictId: string, resolution: SaveConflictResolution) =>
+    call<void>('resolve_save_conflict', { game, conflictId, resolution }),
 
   // src/api/snapshots.rs
   listSnapshots: (gameId: string | null) => call<Snapshot[]>('list_snapshots', { gameId }),

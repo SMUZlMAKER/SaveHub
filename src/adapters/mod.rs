@@ -11,6 +11,7 @@ pub enum AdapterError {
 }
 pub mod autostart;
 pub mod config;
+pub mod credentials;
 pub mod fs;
 pub mod git;
 pub mod process;
