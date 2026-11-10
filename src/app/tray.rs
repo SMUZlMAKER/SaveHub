@@ -191,7 +191,9 @@ fn spawn_status_refresher(app: AppHandle) {
             std::thread::sleep(STATUS_REFRESH);
             let state = app.state::<TrayState>();
             let text = sync_status(state.view.lock().unwrap().last_sync, SystemTime::now());
-            if let Some(item) = state.status_item.lock().unwrap().as_ref() {
+            // set_text waits for the UI thread, which may need status_item to rebuild the menu.
+            let status_item = state.status_item.lock().unwrap().clone();
+            if let Some(item) = status_item {
                 let _ = item.set_text(text);
             }
         }
