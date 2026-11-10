@@ -1,4 +1,4 @@
-use tauri::WindowEvent;
+use tauri::{Manager, WindowEvent};
 
 use crate::api;
 use crate::app::tray;
@@ -6,6 +6,13 @@ use crate::app::tray;
 pub fn start() {
     // TODO: прочитать конфигурацию, создать хранилища и сервисы, запустить RepoWorker (см. app/mod.rs)
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("SaveHub")
+                .arg("--autostart")
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             api::games::list_games,
             api::games::add_game,
@@ -23,9 +30,21 @@ pub fn start() {
             api::settings::get_settings,
             api::settings::update_settings,
             api::settings::set_github_token,
+            api::updates::get_app_preferences,
+            api::updates::save_app_preferences,
+            api::updates::get_update_status,
+            api::updates::check_for_updates,
+            api::updates::install_update,
         ])
         .setup(|app| {
             tray::setup(app.handle())?;
+            app.manage(crate::app::updates::Updates::load(app.handle())?);
+            if !std::env::args().any(|arg| arg == "--autostart") {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.show()?;
+                }
+            }
+            crate::background::updates::spawn(app.handle().clone());
             Ok(())
         })
         // Приложение живет в трее: крестик прячет окно, а не завершает процесс

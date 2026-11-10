@@ -9,6 +9,7 @@ pub enum AdapterError {
     Credentials(String),
     UnsupportedPlatform,
 }
+pub mod autostart;
 pub mod config;
 pub mod fs;
 pub mod git;

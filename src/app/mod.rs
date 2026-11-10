@@ -5,3 +5,5 @@
 // 3. Запустить Tauri, указав статику и все нужные Rust-хуки
 pub mod app;
 pub mod tray;
+
+pub mod updates;

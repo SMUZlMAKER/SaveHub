@@ -5,3 +5,5 @@ target/
 
 # сгенерированные tauri-build JSON-схемы
 /gen/schemas
+
+MEMORY.md

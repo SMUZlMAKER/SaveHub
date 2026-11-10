@@ -15,3 +15,5 @@ pub mod sync;
 mod stub;
 
 pub use error::{ApiError, ApiResult};
+
+pub mod updates;

@@ -1,28 +1,23 @@
 # Разработка
 
-Важно: проект настроен на LF (`\n`), через `.gitattributes` включена конвертация к `LF`.
+Стек: Rust, Tauri 2, Svelte 5, TypeScript, Vite. Фронтенд — `frontend/`,
+конфигурация Tauri — `tauri.conf.json`. В проекте используются окончания строк LF.
 
-## Про фронтенд (Tauri + Svelte)
+Для Windows нужны Node.js 24, Rust MSVC, Visual Studio Build Tools с C++ и WebView2.
 
-Фронтенд лежит во `frontend/`: Svelte 5 + TypeScript + Vite. Конфиг Tauri — `tauri.conf.json` в корне репозитория.
-
-Нужны Rust (toolchain `msvc` на Windows), Node.js 24 и WebView2.
-
-### Запуск для разработки
+## Локальный запуск
 
 Из корня репозитория:
 
 ```bash
 cd frontend
 npm ci
-npm run tauri dev     # vite dev-сервер + rust-приложение с hot reload фронта
+npm run tauri dev
 ```
 
-Окно закрывается в трей; выйти — через пункт «Выход» в меню иконки в трее.
+Закрытие окна сворачивает приложение в трей. Завершение — пункт «Выход» в меню трея.
 
-### Проверки
-
-Из корня репозитория:
+## Проверки
 
 ```bash
 cd frontend
@@ -33,16 +28,11 @@ cd ..
 cargo test --locked
 ```
 
-Перед Rust-тестами собираем фронтенд для встраиваемых ресурсов Tauri.
+Фронтенд необходимо собрать перед Rust-тестами: Tauri встраивает его ресурсы.
 
-### Windows-установщик
+## Windows-установщик
 
-Запускать из **Windows PowerShell/CMD**, с Windows-версиями Node.js и Rust MSVC
-и установленными Visual Studio Build Tools с компонентами C++.
-Обычная сборка в WSL создаёт Linux-приложение. Для Windows используйте эти команды
-в Windows или ручной запуск GitHub Actions.
-
-Из корня репозитория:
+Собирать в Windows PowerShell/CMD с Windows-версиями Node.js и Rust:
 
 ```powershell
 cd frontend
@@ -50,51 +40,67 @@ npm ci
 npm run tauri -- build --bundles nsis -- --locked
 ```
 
-Tauri сам собирает фронтенд, Rust-приложение и NSIS-установщик.
-Результат относительно **корня репозитория**: `target/release/bundle/nsis/*-setup.exe`.
-Каталог называется `bundle`, без `s`, и появляется на этапе упаковки.
-При явном `--target` путь — `target/<target-triple>/release/bundle/nsis/`;
-при переопределении `CARGO_TARGET_DIR` вместо `target/` используется указанная директория.
+Результат: `target/release/bundle/nsis/*-setup.exe`. При явном `--target`
+в путь добавляется целевая платформа. Обычная сборка в WSL не создаёт Windows-установщик.
 
-`cargo build` собирает только Rust-код, `npm run build` — только фронтенд;
-установщик эти команды не создают. С `--no-bundle` упаковка также пропускается.
-После успешной упаковки Tauri выводит путь к `setup.exe` в конце лога.
+NSIS устанавливает приложение для текущего пользователя и при необходимости
+скачивает WebView2. Windows Authenticode пока не используется.
 
-NSIS устанавливает приложение для текущего пользователя. Если WebView2 отсутствует,
-установщик скачивает его bootstrapper: для этого потребуется интернет. Сборки пока без подписи.
+## CI и релизы
 
-### CI и выпуск Windows-установщика
+Workflow `.github/workflows/windows.yml` собирает Windows x64:
 
-Workflow `.github/workflows/windows.yml` выполняется на Windows x64:
+- PR и push в `main`: проверка типов, сборка фронтенда, Rust-тесты и сборка
+  приложения без установщика.
+- **Actions → Windows CI and release → Run workflow**: сборка установщика
+  и публикация релиза. Ветка `main` — стабильный релиз, остальные — prerelease.
+- Комментарий `/prerelease` в открытом PR: выпуск пререлиза с текущего SHA ветки.
+  Нужен write-доступ; PR из форков не поддерживаются.
 
-- В PR и после push в `main`: проверка Svelte/TypeScript, сборка фронтенда,
-  `cargo test --locked` и release-сборка приложения без упаковки.
-- Вручную: **Actions → Windows CI and release → Run workflow**, выбрать ветку.
-  После проверок собирается NSIS `setup.exe` и публикуется GitHub Release.
-  Для `main` это обычный релиз, для остальных веток — prerelease.
-- Из открытого PR: оставить отдельный комментарий `/prerelease` без другого текста.
-  Нужен write-доступ; поддерживаются ветки этого репозитория, но не форки.
-  Собирается SHA головы PR на момент обработки команды, результат всегда prerelease.
-  Ссылка на релиз появляется в Summary job публикации в Actions; бот в PR не пишет.
+Ссылка на релиз находится в Summary job публикации. Тег выпуска:
+`build-<run_id>-<run_attempt>`.
 
-Для ручного запуска и команды из PR workflow сначала должен попасть в default-ветку.
-Личный GitHub-токен и дополнительные secrets для CI не нужны: используется `GITHUB_TOKEN`.
-Право `contents: write` есть только у отдельной job публикации, которая не исполняет код PR.
-Настройки организации/репозитория должны разрешать GitHub Actions создавать релизы.
+### Версия приложения
 
-Каждый выпуск получает уникальный тег `build-<run_id>-<run_attempt>` на собранном коммите.
-Версии в `Cargo.toml` и `tauri.conf.json` должны совпадать; CI их не увеличивает.
-В релизе указаны SHA коммита, ссылка на сборку и SHA256 установщика.
-Установщик также доступен в Actions artifacts 14 дней. При ошибке загрузки останется
-неопубликованный draft; повторный запуск создаст новый выпуск с новым тегом.
+Перед стабильным релизом повысьте версию: PATCH для исправлений, MINOR для новых функций.
 
-MSI, автообновление и автозапуск в этот workflow не входят.
+1. Обновите `Cargo.toml` (`[package].version`) и `tauri.conf.json` (`version`).
+2. Выполните `cargo check`, чтобы обновить запись `savehub` в `Cargo.lock`.
+3. Включите все три файла в коммит.
+
+Версия должна быть выше предыдущего стабильного релиза. CI проверяет версии,
+но не повышает их автоматически.
+
+### Подпись обновлений
+
+Для стабильного выпуска в GitHub Actions должны быть настроены:
+
+| Тип | Имя | Значение |
+| --- | --- | --- |
+| Variable | `SAVEHUB_UPDATER_PUBLIC_KEY` | Публичный ключ Tauri |
+| Secret | `TAURI_SIGNING_PRIVATE_KEY` | Приватный ключ Tauri |
+| Secret | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Пароль ключа |
+
+Создание ключей описано в [документации Tauri Updater](https://v2.tauri.app/plugin/updater/).
+Ключи создаются один раз для проекта; приватный ключ и пароль не хранятся в Git.
+Обычная разработка и пререлизы не требуют приватного ключа.
+
+Стабильный релиз содержит установщик, `.sig` и `latest.json` и назначается Latest
+после загрузки всех файлов. Пререлизы в канал автообновлений не входят.
+
+Для локальной сборки с подписью задайте те же переменные окружения и из `frontend/` выполните:
+
+```powershell
+npm run tauri -- build --bundles nsis --config tauri.updater.conf.json -- --locked
+```
+
+## Работа с кодом
 
 ### Контракт фронт ↔ бэк
 
-Фронт уже вызывает все ручки, которые нужны экранам. Пока бэкенда нет, ручки в `src/api/` — заглушки:
-чтение отдает демо-данные, действия возвращают `ApiError::NotImplemented` (фронт покажет «Бэкенд пока не умеет: …»).
-Где что подключать — помечено `TODO(backend)`. В `tauri dev` внизу каждого экрана видно, какие ручки он вызывает.
+Команды находятся в `src/api/`, вызовы фронтенда — в `frontend/src/lib/api.ts`.
+Нереализованные действия возвращают `ApiError::NotImplemented`;
+места подключения логики отмечены `TODO(backend)`.
 
 Правила:
 
@@ -111,6 +117,7 @@ MSI, автообновление и автозапуск в этот workflow �
 | Профили | `list_profiles`, `switch_profile`, `create_profile`, `delete_profile` | ProfileService, workflows::SwitchProfile |
 | Снапшоты | `list_snapshots`, `restore_snapshot` | SaveService / снапшоты, сценарий отката |
 | Настройки | `get_settings`, `update_settings`, `set_github_token` | хранилище Settings, системное хранилище токена |
+| Запуск и обновления | `get_app_preferences`, `save_app_preferences`, `get_update_status`, `check_for_updates`, `install_update` | реализованы; настройки в `updates.json` |
 | Шапка, трей | `get_sync_status`, `sync_now` | RepoWorker |
 | Конфликты | `list_conflicts`, `resolve_conflict` | RepoWorker, сценарий разрешения конфликта |
 
@@ -129,6 +136,8 @@ MSI, автообновление и автозапуск в этот workflow �
   - `domain/`: доменные структуры (игры, профили)
   - `services/`: основная логика. GameService, ProfileService, SaveService, .... Каждый метод делает простое, гранулярное действие: "добавить новый профиль", "получить список всех игр".
   - `workflows/`: сценарии. Для сложных действий, по типу переключения профиля, требуется задействовать несколько сервисов - для того, чтобы не сорить ответственностью, такие сложные сценарии выносятся сюда.
+
+`services/` и `domain/` не должны зависеть от Tauri или контрактов фронтенда.
 
 ### Взаимодействие
 

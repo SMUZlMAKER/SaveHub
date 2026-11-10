@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type {
   ApiErrorKind,
+  AppPreferences,
+  UpdateStatus,
   Conflict,
   ConflictResolution,
   Game,
@@ -50,6 +52,14 @@ export function describeError(e: unknown): string {
 
 // Ключи аргументов — camelCase: Tauri сам сопоставит их со snake_case-параметрами в Rust.
 export const api = {
+  getAppPreferences: () => call<AppPreferences>('get_app_preferences'),
+  saveAppPreferences: (preferences: AppPreferences) => call<void>('save_app_preferences', {
+    preferences: { checkOnStartup: preferences.checkOnStartup, checkPeriodically: preferences.checkPeriodically },
+    launchAtLogin: preferences.launchAtLogin,
+  }),
+  getUpdateStatus: () => call<UpdateStatus>('get_update_status'),
+  checkForUpdates: () => call<UpdateStatus>('check_for_updates'),
+  installUpdate: () => call<void>('install_update'),
   // src/api/games.rs
   listGames: () => call<Game[]>('list_games'),
   addGame: (name: string, savePath: string) => call<Game>('add_game', { name, savePath }),
@@ -87,6 +97,7 @@ export const events = {
   syncStatusChanged: 'sync-status-changed',
   conflictsChanged: 'conflicts-changed',
   navigate: 'navigate',
+  updateStatusChanged: 'update-status-changed',
 } as const
 
 /** Подписка на событие бэкенда. Возвращает функцию отписки — удобно вернуть из onMount. */

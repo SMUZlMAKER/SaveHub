@@ -3,7 +3,7 @@
   import { api, events, subscribe } from './lib/api'
   import { formatAgo } from './lib/format'
   import { notice } from './lib/notice.svelte'
-  import type { ScreenId, SyncStatus } from './lib/types'
+  import type { ScreenId, SyncStatus, UpdateStatus } from './lib/types'
   import GamesScreen from './screens/GamesScreen.svelte'
   import ProfilesScreen from './screens/ProfilesScreen.svelte'
   import SnapshotsScreen from './screens/SnapshotsScreen.svelte'
@@ -18,6 +18,7 @@
   ]
   const screenIds: ScreenId[] = ['games', 'profiles', 'snapshots', 'settings', 'conflicts']
 
+  let update = $state<UpdateStatus | null>(null)
   let screen = $state<ScreenId>('games')
   let sync = $state<SyncStatus | null>(null)
   let conflictCount = $state(0)
@@ -68,10 +69,12 @@
   }
 
   onMount(() => {
+    api.getUpdateStatus().then((value) => { update = value }).catch(console.error)
     loadSync()
     loadConflicts()
     const timer = setInterval(() => (now = Date.now()), 30_000)
     const stops = [
+      subscribe<UpdateStatus>(events.updateStatusChanged, (value) => { update = value }),
       subscribe(events.syncStatusChanged, loadSync),
       subscribe(events.conflictsChanged, loadConflicts),
       // Пункты трея «Снапшоты и откат…» и «Настройки…» открывают окно на нужном экране
@@ -104,6 +107,13 @@
     </button>
   {/if}
 </nav>
+
+{#if update?.version}
+  <aside class="row" role="status">
+    Доступно обновление SaveHub {update.version}.
+    <button onclick={() => (screen = 'settings')}>Открыть обновления</button>
+  </aside>
+{/if}
 
 <main>
   {#if screen === 'games'}

@@ -73,3 +73,18 @@ export interface Settings {
 export type ApiErrorKind = 'notImplemented' | 'rejected' | 'internal'
 
 export type ScreenId = 'games' | 'profiles' | 'snapshots' | 'settings' | 'conflicts'
+
+export interface AppPreferences {
+  launchAtLogin: boolean
+  checkOnStartup: boolean
+  checkPeriodically: boolean
+}
+export interface UpdateStatus {
+  currentVersion: string
+  configured: boolean
+  phase: 'idle' | 'checking' | 'available' | 'upToDate' | 'installing' | 'error'
+  version: string | null
+  notes: string | null
+  lastCheckedAt: number | null
+  error: string | null
+}
