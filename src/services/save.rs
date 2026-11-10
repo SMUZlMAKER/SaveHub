@@ -10,7 +10,7 @@ impl SaveService {
         todo!()
     }
 
-    /// Импортировать исходные сохранения или подготовить пустые для нового профиля.
+    /// Импортировать или создать пустое хранилище; существующие данные не перезаписывать.
     pub fn initialize(&self, game_id: GameId, profile_id: &str) -> ServiceResult<()> {
         todo!()
     }
@@ -47,7 +47,7 @@ impl SaveService {
         todo!()
     }
 
-    /// Шаг workflow отката: до вызова нужен BeforeRestore и проверка процессов.
+    /// Применить снимок; требуется бэкап текущих сохранений и остановленная игра.
     pub fn apply_snapshot(&self, snapshot_id: &str) -> ServiceResult<()> {
         todo!()
     }

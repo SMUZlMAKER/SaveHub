@@ -8,7 +8,6 @@ pub struct ProcessInfo {
     pub executable: Option<PathBuf>,
 }
 
-/// Снимок процессов ОС; сопоставление с играми выполняет сервис.
 pub fn list() -> AdapterResult<Vec<ProcessInfo>> {
     todo!()
 }

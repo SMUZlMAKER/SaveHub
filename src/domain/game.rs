@@ -33,7 +33,7 @@ pub enum GameAvailability {
         save_dir_path: PathBuf,
         exe_path: PathBuf,
     },
-    /// Игра остаётся видна на новом ПК; UI предлагает три варианта PathResolution.
+    /// Один или оба пути отсутствуют на этом ПК.
     Missing {
         save_dir_missing: bool,
         exe_missing: bool,

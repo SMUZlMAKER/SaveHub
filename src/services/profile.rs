@@ -37,7 +37,7 @@ impl ProfileService {
         todo!()
     }
 
-    /// Фиксация состояния для SwitchProfile после успешной смены сохранений.
+    /// Зафиксировать активный профиль после успешной смены сохранений.
     pub fn set_active(&self, profile_id: &str) -> ServiceResult<()> {
         todo!()
     }

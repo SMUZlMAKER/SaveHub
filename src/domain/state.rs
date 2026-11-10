@@ -1,4 +1,3 @@
-//! Создаются в app::start и передаются сервисам через Arc.
 use super::*;
 use std::{collections::HashMap, path::PathBuf, sync::RwLock};
 
@@ -47,15 +46,22 @@ pub struct RuntimeState {
 
 struct RuntimeStateInner {
     active_profile: Option<ProfileId>,
-    running_games: Vec<GameId>,
+    running_games: Option<Vec<GameId>>,
     conflicts: Vec<Conflict>,
     sync_status: SyncStatus,
 }
 
 impl RuntimeStateInner {
-    fn set_active_profile(&mut self, active_profile: Option<ProfileId>) -> Result<(), Vec<GameId>> {
-        if !self.running_games.is_empty() {
-            return Err(self.running_games.clone());
+    fn set_active_profile(
+        &mut self,
+        active_profile: Option<ProfileId>,
+    ) -> Result<(), ProfileActivationError> {
+        let games = self
+            .running_games
+            .as_ref()
+            .ok_or(ProfileActivationError::ProcessesUnknown)?;
+        if !games.is_empty() {
+            return Err(ProfileActivationError::GamesRunning(games.clone()));
         }
         self.active_profile = active_profile;
         Ok(())
@@ -68,18 +74,19 @@ impl RuntimeStateInner {
                 unique.push(game);
             }
         }
+        let previous = self.running_games.as_deref().unwrap_or_default();
         let mut events = Vec::new();
-        for game in &self.running_games {
+        for game in previous {
             if !unique.contains(game) {
                 events.push(GameProcessEvent::Stopped(*game));
             }
         }
         for game in &unique {
-            if !self.running_games.contains(game) {
+            if !previous.contains(game) {
                 events.push(GameProcessEvent::Started(*game));
             }
         }
-        self.running_games = unique;
+        self.running_games = Some(unique);
         events
     }
 
@@ -99,14 +106,13 @@ impl RuntimeStateInner {
 impl RuntimeState {
     pub fn new(
         active_profile: Option<ProfileId>,
-        running_games: Vec<GameId>,
         conflicts: Vec<Conflict>,
         sync_status: SyncStatus,
     ) -> Self {
         Self {
             inner: RwLock::new(RuntimeStateInner {
                 active_profile,
-                running_games,
+                running_games: None,
                 conflicts,
                 sync_status,
             }),
@@ -118,19 +124,28 @@ impl RuntimeState {
         inner.active_profile.clone()
     }
 
-    pub fn profile_and_running_games(&self) -> (Option<ProfileId>, Vec<GameId>) {
+    pub fn profile_and_running_games(&self) -> (Option<ProfileId>, Option<Vec<GameId>>) {
         let inner = self.inner.read().expect("RuntimeState lock poisoned");
         (inner.active_profile.clone(), inner.running_games.clone())
     }
 
-    pub fn set_active_profile(&self, active_profile: Option<ProfileId>) -> Result<(), Vec<GameId>> {
+    pub fn set_active_profile(
+        &self,
+        active_profile: Option<ProfileId>,
+    ) -> Result<(), ProfileActivationError> {
         let mut inner = self.inner.write().expect("RuntimeState lock poisoned");
         inner.set_active_profile(active_profile)
     }
 
-    pub fn running_games(&self) -> Vec<GameId> {
+    /// None — процессы ещё не проверены или последний опрос завершился ошибкой.
+    pub fn running_games(&self) -> Option<Vec<GameId>> {
         let inner = self.inner.read().expect("RuntimeState lock poisoned");
         inner.running_games.clone()
+    }
+
+    pub fn invalidate_process_state(&self) {
+        let mut inner = self.inner.write().expect("RuntimeState lock poisoned");
+        inner.running_games = None;
     }
 
     /// Сравнение и замена выполняются под одним локом, чтобы не дублировать события.
@@ -253,7 +268,6 @@ mod tests {
         RuntimeState::new(
             Some("a".into()),
             Vec::new(),
-            Vec::new(),
             SyncStatus {
                 state: SyncState::Idle,
                 last_sync_at: None,
@@ -320,18 +334,35 @@ mod tests {
         });
         assert_eq!(
             runtime.set_active_profile(Some("b".into())),
-            Err(vec![game])
+            Err(ProfileActivationError::GamesRunning(vec![game]))
         );
         assert_eq!(
             runtime.profile_and_running_games(),
-            (Some("a".into()), vec![game])
+            (Some("a".into()), Some(vec![game]))
         );
         let events = runtime.set_running_games(vec![]);
         assert!(matches!(events.as_slice(), [GameProcessEvent::Stopped(id)] if *id == game));
         runtime.set_active_profile(Some("b".into())).unwrap();
         assert_eq!(
             runtime.profile_and_running_games(),
-            (Some("b".into()), vec![])
+            (Some("b".into()), Some(vec![]))
         );
+    }
+    #[test]
+    fn unverified_processes_block_profile_activation() {
+        let runtime = runtime();
+        assert_eq!(runtime.running_games(), None);
+        assert_eq!(
+            runtime.set_active_profile(Some("b".into())),
+            Err(ProfileActivationError::ProcessesUnknown)
+        );
+        runtime.set_running_games(vec![]);
+        runtime.set_active_profile(Some("b".into())).unwrap();
+        runtime.invalidate_process_state();
+        assert_eq!(
+            runtime.set_active_profile(Some("a".into())),
+            Err(ProfileActivationError::ProcessesUnknown)
+        );
+        assert_eq!(runtime.active_profile(), Some("b".into()));
     }
 }

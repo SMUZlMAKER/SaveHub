@@ -7,6 +7,7 @@ pub enum MergeOutcome {
     UpToDate,
     Merged(CommitId),
     Conflicts(Vec<PathBuf>),
+    Diverged,
 }
 
 /// Клонировать с ключом системного хранилища учётных данных.
@@ -44,8 +45,13 @@ pub fn checkout(repo: &Path, revision: &str) -> AdapterResult<()> {
     todo!()
 }
 
-/// Выделить worktree для служебной ветки каталога.
-pub fn create_worktree(repo: &Path, branch: &str, path: &Path) -> AdapterResult<()> {
+/// from = None создаёт ветку без истории, Some — от указанной ревизии.
+pub fn create_worktree(
+    repo: &Path,
+    branch: &str,
+    path: &Path,
+    from: Option<&str>,
+) -> AdapterResult<()> {
     todo!()
 }
 
@@ -66,8 +72,8 @@ pub fn head(repo: &Path) -> AdapterResult<CommitId> {
     todo!()
 }
 
-/// Слить ревизию, вернув конфликты без выбора победителя.
-pub fn merge(repo: &Path, revision: &str) -> AdapterResult<MergeOutcome> {
+/// При fast_forward_only расхождение возвращает Diverged без изменения дерева.
+pub fn merge(repo: &Path, revision: &str, fast_forward_only: bool) -> AdapterResult<MergeOutcome> {
     todo!()
 }
 

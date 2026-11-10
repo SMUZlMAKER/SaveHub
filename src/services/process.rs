@@ -10,17 +10,16 @@ impl ProcessService {
         todo!()
     }
 
-    /// Обновить список запущенных игр и вернуть события запуска и завершения.
+    /// Обновить список игр и события; при ошибке опроса сбросить состояние в неизвестное.
     pub fn refresh_running_games(&self) -> ServiceResult<Vec<GameProcessEvent>> {
         todo!()
     }
 
-    /// Шаг workflow запуска после fetch, выбора профиля и разрешения конфликтов.
     pub fn launch(&self, game_id: GameId) -> ServiceResult<u32> {
         todo!()
     }
 
-    /// Создать ярлык запуска через SaveHub для проверки синхронизации до старта.
+    /// Создать ярлык запуска игры через SaveHub.
     pub fn create_shortcut(
         &self,
         game_id: GameId,

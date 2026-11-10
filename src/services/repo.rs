@@ -6,7 +6,6 @@ pub struct RepoService;
 
 #[allow(unused_variables)]
 impl RepoService {
-    /// Длительные вызовы выполнять вне UI-потока.
     pub fn new(catalog: Arc<Catalog>, runtime: Arc<RuntimeState>, settings: Arc<Settings>) -> Self {
         todo!()
     }
@@ -25,22 +24,26 @@ impl RepoService {
         todo!()
     }
 
-    /// Получить и применить обновления профиля; вернуть конфликты без потери обеих версий.
-    pub fn pull_profile(&self, profile_id: &str) -> ServiceResult<Vec<Conflict>> {
+    /// Обновить удалённые ссылки, не меняя рабочие сохранения.
+    pub fn fetch(&self) -> ServiceResult<()> {
         todo!()
     }
 
-    /// Шаг SwitchProfile после сохранения текущего профиля.
+    /// Применить уже полученные изменения после проверки процессов и бэкапа.
+    pub fn apply_profile_updates(&self, profile_id: &str) -> ServiceResult<Vec<Conflict>> {
+        todo!()
+    }
+
     pub fn checkout_profile(&self, profile_id: &str) -> ServiceResult<()> {
         todo!()
     }
 
-    /// Коммит при выходе, по таймеру или вручную; None при отсутствии изменений.
+    /// Создать коммит; None при отсутствии изменений.
     pub fn checkpoint(&self, profile_id: &str, message: &str) -> ServiceResult<Option<CommitId>> {
         todo!()
     }
 
-    /// Отправить коммиты; retry планирует RepoWorker.
+    /// Повторная отправка не создаёт новый снимок или коммит.
     pub fn push(&self, profile_id: &str) -> ServiceResult<()> {
         todo!()
     }
@@ -49,7 +52,7 @@ impl RepoService {
         todo!()
     }
 
-    /// Шаг workflow после бэкапа; не терять вторую версию.
+    /// Применить выбор, сохранив вторую версию конфликта.
     pub fn resolve_conflict(
         &self,
         conflict_id: &str,

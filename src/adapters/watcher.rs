@@ -1,16 +1,15 @@
 #![allow(unused_variables)]
 use super::AdapterResult;
-use std::{path::PathBuf, sync::mpsc::Receiver, time::Duration};
+use std::{path::PathBuf, sync::mpsc::Receiver};
 
 pub struct WatchHandle {
     _private: (),
 }
 
-/// Подписаться на изменения и переименования с debounce 5–10 секунд.
+/// Передавать пути изменённых файлов и ошибки наблюдения без debounce.
 pub fn watch(
     paths: &[PathBuf],
-    debounce: Duration,
-) -> AdapterResult<(WatchHandle, Receiver<Vec<PathBuf>>)> {
+) -> AdapterResult<(WatchHandle, Receiver<AdapterResult<Vec<PathBuf>>>)> {
     todo!()
 }
 

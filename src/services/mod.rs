@@ -1,4 +1,3 @@
-//! Составные операции (switch/restore/sync/launch/shutdown) принадлежат workflows.
 pub type ServiceResult<T> = Result<T, ServiceError>;
 
 #[derive(Debug)]
@@ -6,6 +5,7 @@ pub enum ServiceError {
     NotFound(String),
     InvalidInput(String),
     GameRunning(Vec<crate::domain::GameId>),
+    ProcessesUnknown,
     Conflict(String),
     Adapter(crate::adapters::AdapterError),
 }

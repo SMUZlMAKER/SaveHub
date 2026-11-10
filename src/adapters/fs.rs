@@ -28,8 +28,12 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> AdapterResult<()> {
     todo!()
 }
 
-/// Скопировать дерево, не следуя symlink; ошибка блокировки доступна вызывающему для retry.
+/// Скопировать дерево без перехода по symlink; при блокировке файла вернуть FileLocked.
 pub fn copy_tree(source: &Path, destination: &Path) -> AdapterResult<()> {
+    todo!()
+}
+
+pub fn remove_file(path: &Path) -> AdapterResult<()> {
     todo!()
 }
 

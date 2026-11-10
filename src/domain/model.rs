@@ -97,3 +97,9 @@ pub enum GameProcessEvent {
     Started(GameId),
     Stopped(GameId),
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProfileActivationError {
+    ProcessesUnknown,
+    GamesRunning(Vec<GameId>),
+}
