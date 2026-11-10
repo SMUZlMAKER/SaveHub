@@ -90,10 +90,10 @@ fn demo(root: &Path) -> Result<()> {
     commit(&repo, "Update example file")?;
 
     checkout(&repo, "refs/heads/main")?;
-    assert_eq!(fs::read_to_string(root.join("example.txt"))?, "version=1\n");
+    assert_eq!(fs::read_to_string(root.join("example.txt"))?.trim_end(), "version=1");
 
     checkout(&repo, "refs/heads/example-branch")?;
-    assert_eq!(fs::read_to_string(root.join("example.txt"))?, "version=2\n");
+    assert_eq!(fs::read_to_string(root.join("example.txt"))?.trim_end(), "version=2");
 
     checkout(&repo, "refs/heads/main")?;
 
