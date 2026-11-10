@@ -107,6 +107,8 @@ jobs:
         run: npm run build
       - name: Run Rust unit and documentation tests
         run: cargo test --release --locked
+      - name: Test updater configuration generation
+        run: node --test .github/scripts/prepare-updater.test.mjs
       # Signing secrets are available only to a manual stable release from main.
       # PR and branch code never receives the private key.
       - name: Build signed stable installer
@@ -120,7 +122,9 @@ jobs:
           if (!$env:SAVEHUB_UPDATER_PUBLIC_KEY -or !$env:TAURI_SIGNING_PRIVATE_KEY) {
             throw 'Configure SAVEHUB_UPDATER_PUBLIC_KEY variable and TAURI_SIGNING_PRIVATE_KEY secret before releasing.'
           }
-          npm run tauri -- build --bundles nsis --ci --config tauri.updater.conf.json -- --locked
+          node ../.github/scripts/prepare-updater.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run tauri -- build --bundles nsis --ci --config target/updater/tauri.updater.conf.json -- --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build preview installer
         if: needs.source.outputs.publish == 'true' && needs.source.outputs.prerelease == 'true'
