@@ -32,7 +32,6 @@ pub struct TrayView {
     pub active_profile: Option<String>,
     /// Игра, которая сейчас запущена: пока она идет, профили переключать нельзя.
     pub running_game: Option<String>,
-    pub last_sync: Option<SystemTime>,
 }
 
 impl TrayView {
@@ -42,7 +41,6 @@ impl TrayView {
             profiles: Vec::new(),
             active_profile: None,
             running_game: None,
-            last_sync: None,
         }
     }
 }
@@ -145,12 +143,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     )?)?;
 
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    let status = MenuItem::new(
-        app,
-        sync_status(view.last_sync, SystemTime::now()),
-        false,
-        None::<&str>,
-    )?;
+    let status = MenuItem::new(app, current_sync_status(app), false, None::<&str>)?;
     menu.append(&status)?;
     *state.status_item.lock().unwrap() = Some(status);
 
@@ -185,8 +178,12 @@ fn switch_profile(app: &AppHandle, _profile: &str) {
 }
 
 fn sync_now(app: &AppHandle) {
-    // Until RepoWorker is connected, never invent a last-sync timestamp.
-    open_screen(app, "settings");
+    if let Err(error) = app
+        .state::<crate::background::repo::RepoWorkerHandle>()
+        .sync_now()
+    {
+        eprintln!("Не удалось запустить синхронизацию: {error:?}");
+    }
 }
 
 fn open_screen(app: &AppHandle, screen: &str) {
@@ -194,17 +191,35 @@ fn open_screen(app: &AppHandle, screen: &str) {
     let _ = app.emit_to(MAIN_WINDOW, NAVIGATE, screen);
 }
 
+pub fn refresh_sync_status(app: &AppHandle) {
+    let state = app.state::<TrayState>();
+    let item = state.status_item.lock().unwrap().clone();
+    if let Some(item) = item {
+        let _ = item.set_text(current_sync_status(app));
+    }
+}
+
+fn current_sync_status(app: &AppHandle) -> String {
+    use crate::domain::{RuntimeState, SyncState};
+    let status = app.state::<std::sync::Arc<RuntimeState>>().sync_status();
+    match status.state {
+        SyncState::NotConfigured => "○ Репозиторий не настроен".into(),
+        SyncState::Syncing => "↻ Синхронизация…".into(),
+        SyncState::Error => "○ Ошибка синхронизации".into(),
+        SyncState::Idle => sync_status(
+            status
+                .last_sync_at
+                .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
+            SystemTime::now(),
+        ),
+    }
+}
+
 fn spawn_status_refresher(app: AppHandle) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(STATUS_REFRESH);
-            let state = app.state::<TrayState>();
-            let text = sync_status(state.view.lock().unwrap().last_sync, SystemTime::now());
-            // set_text waits for the UI thread, which may need status_item to rebuild the menu.
-            let status_item = state.status_item.lock().unwrap().clone();
-            if let Some(item) = status_item {
-                let _ = item.set_text(text);
-            }
+            refresh_sync_status(&app);
         }
     });
 }

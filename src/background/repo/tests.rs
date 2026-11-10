@@ -1,0 +1,642 @@
+use super::*;
+use crate::{
+    domain::{CommitId, ProfileId, RepositoryConfig, RuntimeState, SyncState, SyncStatus},
+    services::repo::RepoOperations,
+};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
+
+const PROFILE_A: ProfileId = uuid::Uuid::from_u128(1);
+const PROFILE_B: ProfileId = uuid::Uuid::from_u128(2);
+
+fn profile_name(profile: &ProfileId) -> &'static str {
+    match *profile {
+        PROFILE_A => "a",
+        PROFILE_B => "b",
+        _ => panic!("unexpected profile: {profile}"),
+    }
+}
+
+#[derive(Default)]
+struct FakeRepo {
+    calls: Mutex<Vec<String>>,
+    events: Mutex<Option<mpsc::Sender<String>>>,
+    fail_push: AtomicBool,
+    fail_fetch: AtomicBool,
+    fail_checkpoint: AtomicBool,
+    clean: AtomicBool,
+    unconfigured: AtomicBool,
+    repository: std::sync::atomic::AtomicUsize,
+    panic_fetch: AtomicBool,
+    creates_commit: AtomicBool,
+    fetch_delay: Mutex<Duration>,
+    fetch_finished: Mutex<Option<Instant>>,
+}
+
+impl FakeRepo {
+    fn record(&self, call: String, fail: bool) -> ServiceResult<()> {
+        self.calls.lock().unwrap().push(call.clone());
+        if let Some(events) = self.events.lock().unwrap().as_ref() {
+            let _ = events.send(call);
+        }
+        if fail {
+            Err(ServiceError::Conflict("test failure".into()))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn take_calls(&self) -> Vec<String> {
+        std::mem::take(&mut *self.calls.lock().unwrap())
+    }
+}
+
+impl RepoOperations for FakeRepo {
+    fn configuration(&self) -> Option<RepositoryConfig> {
+        (!self.unconfigured.load(Ordering::SeqCst)).then(|| RepositoryConfig {
+            url: format!("repo-{}", self.repository.load(Ordering::SeqCst)),
+            path: "saves".into(),
+        })
+    }
+
+    fn checkpoint(&self, profile: &ProfileId) -> ServiceResult<Option<CommitId>> {
+        self.record(
+            format!("checkpoint:{}", profile_name(profile)),
+            self.fail_checkpoint.load(Ordering::SeqCst),
+        )?;
+        Ok(self
+            .creates_commit
+            .load(Ordering::SeqCst)
+            .then(|| "commit".into()))
+    }
+
+    fn has_unpushed_commits(&self, _profile: &ProfileId) -> ServiceResult<bool> {
+        Ok(!self.clean.load(Ordering::SeqCst))
+    }
+
+    fn push(&self, profile: &ProfileId) -> ServiceResult<()> {
+        self.record(
+            format!("push:{}", profile_name(profile)),
+            self.fail_push.load(Ordering::SeqCst),
+        )
+    }
+
+    fn fetch(&self) -> ServiceResult<()> {
+        assert!(
+            !self.panic_fetch.load(Ordering::SeqCst),
+            "test worker panic"
+        );
+        thread::sleep(*self.fetch_delay.lock().unwrap());
+        let result = self.record("fetch".into(), self.fail_fetch.load(Ordering::SeqCst));
+        *self.fetch_finished.lock().unwrap() = Some(Instant::now());
+        result
+    }
+}
+
+fn runtime() -> Arc<RuntimeState> {
+    let runtime = Arc::new(RuntimeState::new(
+        Some(PROFILE_A),
+        Vec::new(),
+        SyncStatus {
+            state: SyncState::Idle,
+            last_sync_at: None,
+            error: None,
+        },
+    ));
+    runtime.set_running_games(Vec::new());
+    runtime
+}
+
+fn engine(repo: Arc<FakeRepo>) -> (RepoWorkerLoop, Arc<RuntimeState>, Arc<Mutex<()>>) {
+    let runtime = runtime();
+    let operations = Arc::new(Mutex::new(()));
+    let sync = SyncRepository::new(repo, runtime.clone(), operations.clone());
+
+    (
+        RepoWorkerLoop::new(sync, RepoWorkerOptions::default()),
+        runtime,
+        operations,
+    )
+}
+
+#[test]
+fn startup_pushes_existing_commits_even_without_new_checkpoint() {
+    let repo = Arc::new(FakeRepo::default());
+    let (mut engine, _runtime, _operations) = engine(repo.clone());
+    engine.tick(Instant::now(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a", "fetch"]);
+}
+
+#[test]
+fn push_retry_keeps_profile_and_does_not_repeat_checkpoint() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.fail_push.store(true, Ordering::SeqCst);
+    let (mut engine, _runtime, _operations) = engine(repo.clone());
+    let now = Instant::now();
+
+    assert!(engine.tick(now, false).is_err());
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a", "fetch"]);
+    _runtime.set_active_profile(Some(PROFILE_B)).unwrap();
+    repo.fail_push.store(false, Ordering::SeqCst);
+
+    engine.tick(engine.next_deadline(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["push:a"]);
+    assert!(!engine.sync.has_pending_push());
+}
+
+#[test]
+fn network_failure_does_not_block_local_checkpoint() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.fail_fetch.store(true, Ordering::SeqCst);
+    let (mut engine, _runtime, _operations) = engine(repo.clone());
+    let now = Instant::now();
+
+    assert!(engine.tick(now, false).is_err());
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a", "fetch"]);
+    assert!(engine.tick(engine.next_deadline(), false).is_err());
+    assert_eq!(repo.take_calls(), ["fetch"]);
+}
+
+#[test]
+fn unknown_or_running_processes_block_checkpoint_but_allow_fetch() {
+    let repo = Arc::new(FakeRepo::default());
+    let (mut engine, _runtime, _operations) = engine(repo.clone());
+    let now = Instant::now();
+    _runtime.invalidate_process_state();
+
+    assert!(matches!(
+        engine.tick(now, false),
+        Err(ServiceError::ProcessesUnknown)
+    ));
+    assert_eq!(repo.take_calls(), ["fetch"]);
+    _runtime.set_running_games(vec![uuid::Uuid::new_v4()]);
+    assert!(matches!(
+        engine.tick(engine.next_deadline(), false),
+        Err(ServiceError::GameRunning(_))
+    ));
+    assert!(repo.take_calls().is_empty());
+
+    _runtime.set_running_games(Vec::new());
+    engine.tick(engine.next_deadline(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a"]);
+}
+
+#[test]
+fn busy_workflow_defers_worker_and_profile_is_read_after_lock() {
+    let repo = Arc::new(FakeRepo::default());
+    let (mut engine, _runtime, _operations) = engine(repo.clone());
+    let lock = _operations.clone();
+    let guard = lock.lock().unwrap();
+    let now = Instant::now();
+
+    engine.tick(now, false).unwrap();
+    assert!(repo.take_calls().is_empty());
+    _runtime.set_active_profile(Some(PROFILE_B)).unwrap();
+    drop(guard);
+    engine.tick(engine.next_deadline(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:b", "push:b", "fetch"]);
+}
+
+#[test]
+fn failed_checkpoint_is_retried_without_hot_loop() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.fail_checkpoint.store(true, Ordering::SeqCst);
+    let (mut engine, _runtime, _operations) = engine(repo.clone());
+    let now = Instant::now();
+
+    assert!(engine.tick(now, false).is_err());
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "fetch"]);
+    engine.tick(now + Duration::from_secs(1), false).unwrap();
+    assert!(repo.take_calls().is_empty());
+    repo.fail_checkpoint.store(false, Ordering::SeqCst);
+    engine.tick(engine.next_deadline(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a"]);
+}
+
+#[test]
+fn shutdown_flushes_joins_and_reports_failure() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.fail_push.store(true, Ordering::SeqCst);
+    let worker = RepoWorker::start(
+        SyncRepository::new(repo.clone(), runtime(), Arc::new(Mutex::new(()))),
+        RepoWorkerOptions::default(),
+    )
+    .unwrap();
+    assert!(worker.shutdown().is_err());
+    let calls = repo.take_calls();
+    assert!(calls.iter().any(|call| call == "checkpoint:a"));
+    assert!(calls.iter().any(|call| call == "push:a"));
+}
+
+#[test]
+fn notifications_are_coalesced_and_manual_sync_is_preserved() {
+    let handle = RepoWorkerHandle {
+        wakeup: Arc::new(Wakeup::default()),
+    };
+    handle.sync_now().unwrap();
+    for _ in 0..1000 {
+        handle.files_changed().unwrap();
+    }
+    let requests = handle.wakeup.requests.lock().unwrap();
+    assert!(requests.sync);
+    assert!(requests.last_change.is_some());
+}
+
+#[test]
+fn busy_mutex_does_not_hang_shutdown() {
+    let repo = Arc::new(FakeRepo::default());
+    let operations = Arc::new(Mutex::new(()));
+    let _guard = operations.lock().unwrap();
+    let worker = RepoWorker::start(
+        SyncRepository::new(repo.clone(), runtime(), operations.clone()),
+        RepoWorkerOptions::default(),
+    )
+    .unwrap();
+    assert!(worker.shutdown().is_err());
+    assert!(repo.take_calls().is_empty());
+}
+
+#[test]
+fn debounce_waits_for_quiet_but_periodic_scan_bounds_delay() {
+    let repo = Arc::new(FakeRepo::default());
+    let (mut engine, _runtime, _operations) = engine(repo.clone());
+    let now = Instant::now();
+    engine.tick(now, false).unwrap();
+    repo.take_calls();
+
+    let changed = now + Duration::from_secs(1);
+    engine.schedule_requests(
+        &Requests {
+            last_change: Some(changed),
+            ..Requests::default()
+        },
+        changed,
+    );
+    engine.tick(changed, false).unwrap();
+    assert!(repo.take_calls().is_empty());
+    engine
+        .tick(changed + engine.options.debounce, false)
+        .unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a"]);
+
+    let scan_due = engine.scan_due;
+    engine.schedule_requests(
+        &Requests {
+            last_change: Some(scan_due),
+            ..Requests::default()
+        },
+        scan_due,
+    );
+    engine.tick(scan_due, false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a"]);
+}
+
+#[test]
+fn fetch_success_does_not_clear_an_unresolved_checkpoint_error() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.fail_checkpoint.store(true, Ordering::SeqCst);
+    let (mut engine, _runtime, _operations) = engine(repo);
+    let now = Instant::now();
+    assert!(engine.tick(now, false).is_err());
+
+    engine.fetch_due = now;
+    engine.tick(now + Duration::from_secs(1), false).unwrap();
+    assert!(matches!(_runtime.sync_status().state, SyncState::Error));
+    assert!(_runtime.sync_status().last_sync_at.is_none());
+}
+
+#[test]
+fn poisoned_operation_lock_never_permits_io() {
+    let repo = Arc::new(FakeRepo::default());
+    let (mut engine, _runtime, _operations) = engine(repo.clone());
+    let operations = _operations.clone();
+    let _ = thread::spawn(move || {
+        let _guard = operations.lock().unwrap();
+        panic!("test poisoned operation");
+    })
+    .join();
+
+    assert!(engine.tick(Instant::now(), false).is_err());
+    assert!(repo.take_calls().is_empty());
+}
+
+#[test]
+fn idle_worker_waits_until_next_operation_not_polling_interval() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.clean.store(true, Ordering::SeqCst);
+    let (mut worker, _, _) = engine(repo);
+    worker.tick(Instant::now(), false).unwrap();
+
+    assert_eq!(worker.next_deadline(), worker.scan_due);
+    assert!(worker.next_deadline() > Instant::now() + Duration::from_secs(59));
+}
+
+#[test]
+fn file_events_do_not_bypass_checkpoint_backoff() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.fail_checkpoint.store(true, Ordering::SeqCst);
+    let (mut worker, _, _) = engine(repo.clone());
+    let now = Instant::now();
+    assert!(worker.tick(now, false).is_err());
+    repo.take_calls();
+
+    let changed = now + Duration::from_secs(1);
+    worker.schedule_requests(
+        &Requests {
+            last_change: Some(changed),
+            ..Requests::default()
+        },
+        changed,
+    );
+    worker
+        .tick(changed + worker.options.debounce, false)
+        .unwrap();
+    assert!(repo.take_calls().is_empty());
+
+    repo.fail_checkpoint.store(false, Ordering::SeqCst);
+    worker.tick(worker.checkpoint_retry_after, false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a"]);
+}
+
+#[test]
+fn file_events_do_not_bypass_busy_mutex_backoff() {
+    let repo = Arc::new(FakeRepo::default());
+    let (mut worker, _, operations) = engine(repo.clone());
+    let guard = operations.lock().unwrap();
+    let now = Instant::now();
+    worker.tick(now, false).unwrap();
+    drop(guard);
+
+    let changed = now + Duration::from_secs(1);
+    worker.schedule_requests(
+        &Requests {
+            last_change: Some(changed),
+            ..Requests::default()
+        },
+        changed,
+    );
+    worker
+        .tick(changed + worker.options.debounce, false)
+        .unwrap();
+    assert!(repo.take_calls().is_empty());
+    assert_eq!(worker.next_deadline(), worker.operations_retry_after);
+
+    worker.tick(worker.next_deadline(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a", "fetch"]);
+}
+
+#[test]
+fn retry_delay_starts_after_slow_network_operation() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.fail_fetch.store(true, Ordering::SeqCst);
+    *repo.fetch_delay.lock().unwrap() = Duration::from_millis(20);
+    let (mut worker, _, _) = engine(repo.clone());
+    worker.options.retry_interval = Duration::from_millis(5);
+
+    assert!(worker.tick(Instant::now(), false).is_err());
+    let finished = repo.fetch_finished.lock().unwrap().unwrap();
+    assert!(worker.fetch_due >= finished + worker.options.retry_interval);
+}
+
+#[test]
+fn clean_scan_skips_push_but_discovers_external_commits_later() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.clean.store(true, Ordering::SeqCst);
+    let (mut worker, runtime, _) = engine(repo.clone());
+    worker.tick(Instant::now(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "fetch"]);
+    assert!(runtime.sync_status().last_sync_at.is_none());
+
+    repo.clean.store(false, Ordering::SeqCst);
+    worker.tick(worker.scan_due, false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a"]);
+    assert!(runtime.sync_status().last_sync_at.is_some());
+}
+
+#[test]
+fn newly_created_commit_is_pushed_without_ahead_query() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.clean.store(true, Ordering::SeqCst);
+    repo.creates_commit.store(true, Ordering::SeqCst);
+    let (mut worker, _, _) = engine(repo.clone());
+    worker.tick(Instant::now(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a", "fetch"]);
+}
+
+#[test]
+fn empty_request_does_not_publish_success() {
+    let repo = Arc::new(FakeRepo::default());
+    let runtime = runtime();
+    runtime.set_sync_status(SyncStatus {
+        state: SyncState::Error,
+        last_sync_at: Some(42),
+        error: Some("previous error".into()),
+    });
+    let mut sync = SyncRepository::new(repo.clone(), runtime.clone(), Arc::new(Mutex::new(())));
+    sync.execute(SyncRequest::default()).unwrap();
+
+    let status = runtime.sync_status();
+    assert!(matches!(status.state, SyncState::Error));
+    assert_eq!(status.last_sync_at, Some(42));
+    assert_eq!(status.error.as_deref(), Some("previous error"));
+    assert!(repo.take_calls().is_empty());
+}
+
+#[test]
+fn missing_profile_does_not_publish_successful_upload() {
+    let repo = Arc::new(FakeRepo::default());
+    let (mut worker, runtime, _) = engine(repo.clone());
+    runtime.set_active_profile(None).unwrap();
+    worker.tick(Instant::now(), false).unwrap();
+
+    assert_eq!(repo.take_calls(), ["fetch"]);
+    assert!(runtime.sync_status().last_sync_at.is_none());
+}
+
+#[test]
+fn notifications_and_shutdown_wake_a_live_worker_with_distant_deadlines() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.clean.store(true, Ordering::SeqCst);
+    let (events, received) = mpsc::channel();
+    *repo.events.lock().unwrap() = Some(events);
+    let options = RepoWorkerOptions {
+        debounce: Duration::from_millis(10),
+        scan_interval: Duration::from_secs(3600),
+        fetch_interval: Duration::from_secs(3600),
+        ..RepoWorkerOptions::default()
+    };
+    let worker = RepoWorker::start(
+        SyncRepository::new(repo, runtime(), Arc::new(Mutex::new(()))),
+        options,
+    )
+    .unwrap();
+    let handle = worker.handle();
+    let next_event = || {
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker did not wake")
+    };
+
+    assert_eq!(next_event(), "checkpoint:a");
+    assert_eq!(next_event(), "fetch");
+    assert!(matches!(
+        received.recv_timeout(Duration::from_millis(30)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+
+    handle.files_changed().unwrap();
+    assert_eq!(next_event(), "checkpoint:a");
+    handle.sync_now().unwrap();
+    assert_eq!(next_event(), "checkpoint:a");
+    assert_eq!(next_event(), "fetch");
+
+    let (finished, completion) = mpsc::channel();
+    let shutdown = thread::spawn(move || finished.send(worker.shutdown()).unwrap());
+    completion
+        .recv_timeout(Duration::from_secs(2))
+        .expect("shutdown did not wake worker")
+        .unwrap();
+    shutdown.join().unwrap();
+    assert_eq!(next_event(), "checkpoint:a");
+}
+
+#[test]
+fn unconfigured_worker_skips_git_and_resumes_after_settings_change() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.unconfigured.store(true, Ordering::SeqCst);
+    let (mut worker, runtime, _) = engine(repo.clone());
+    let now = Instant::now();
+
+    worker.tick(now, false).unwrap();
+    assert!(repo.take_calls().is_empty());
+    assert!(matches!(
+        runtime.sync_status().state,
+        SyncState::NotConfigured
+    ));
+    assert!(worker.next_deadline() >= now + worker.options.scan_interval);
+
+    repo.unconfigured.store(false, Ordering::SeqCst);
+    worker.schedule_requests(
+        &Requests {
+            sync: true,
+            ..Requests::default()
+        },
+        now,
+    );
+    worker.tick(now, false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a", "fetch"]);
+    assert!(matches!(runtime.sync_status().state, SyncState::Idle));
+
+    repo.unconfigured.store(true, Ordering::SeqCst);
+    worker.schedule_requests(
+        &Requests {
+            sync: true,
+            ..Requests::default()
+        },
+        now,
+    );
+    worker.tick(now, false).unwrap();
+    assert!(repo.take_calls().is_empty());
+    assert!(matches!(
+        runtime.sync_status().state,
+        SyncState::NotConfigured
+    ));
+}
+
+#[test]
+fn unconfigured_worker_shutdown_does_not_attempt_git() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.unconfigured.store(true, Ordering::SeqCst);
+    let runtime = runtime();
+    let sync = SyncRepository::new(repo.clone(), runtime.clone(), Arc::new(Mutex::new(())));
+    let worker = RepoWorker::start(sync, RepoWorkerOptions::default()).unwrap();
+
+    worker.shutdown().unwrap();
+    assert!(repo.take_calls().is_empty());
+    assert!(matches!(
+        runtime.sync_status().state,
+        SyncState::NotConfigured
+    ));
+}
+
+#[test]
+fn changing_repository_does_not_send_pending_profiles_to_new_remote() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.fail_push.store(true, Ordering::SeqCst);
+    let (mut worker, runtime, _) = engine(repo.clone());
+    assert!(worker.tick(Instant::now(), false).is_err());
+    assert!(worker.sync.has_pending_push());
+    repo.take_calls();
+
+    repo.repository.store(1, Ordering::SeqCst);
+    repo.clean.store(true, Ordering::SeqCst);
+    repo.fail_push.store(false, Ordering::SeqCst);
+    let now = Instant::now();
+    worker.schedule_requests(
+        &Requests {
+            sync: true,
+            ..Requests::default()
+        },
+        now,
+    );
+    worker.tick(now, false).unwrap();
+
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "fetch"]);
+    assert!(!worker.sync.has_pending_push());
+    let status = runtime.sync_status();
+    assert!(matches!(status.state, SyncState::Idle));
+    assert!(status.error.is_none());
+    assert!(status.last_sync_at.is_none());
+}
+
+#[test]
+fn status_changes_notify_subscribers_without_blocking_operations() {
+    let runtime = runtime();
+    let mut changes = runtime.subscribe_sync_status();
+    runtime.set_sync_status(SyncStatus {
+        state: SyncState::Syncing,
+        last_sync_at: None,
+        error: None,
+    });
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+    runtime.set_sync_status(SyncStatus {
+        state: SyncState::Error,
+        last_sync_at: None,
+        error: Some("failure".into()),
+    });
+    assert!(changes.has_changed().unwrap());
+    assert!(matches!(runtime.sync_status().state, SyncState::Error));
+}
+
+#[test]
+fn panicked_worker_reports_failure_and_rejects_further_requests() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.panic_fetch.store(true, Ordering::SeqCst);
+    let runtime = runtime();
+    let mut changes = runtime.subscribe_sync_status();
+    let worker = RepoWorker::start(
+        SyncRepository::new(repo, runtime.clone(), Arc::new(Mutex::new(()))),
+        RepoWorkerOptions::default(),
+    )
+    .unwrap();
+    let handle = worker.handle();
+    tauri::async_runtime::block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                changes.changed().await.unwrap();
+                if matches!(runtime.sync_status().state, SyncState::Error) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+    });
+
+    assert!(handle.sync_now().is_err());
+    assert!(handle.files_changed().is_err());
+    assert!(worker.shutdown().is_err());
+}

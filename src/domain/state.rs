@@ -78,6 +78,7 @@ impl Catalog {
 
 pub struct RuntimeState {
     inner: RwLock<RuntimeStateInner>,
+    sync_changes: tokio::sync::watch::Sender<()>,
 }
 
 struct RuntimeStateInner {
@@ -146,6 +147,7 @@ impl RuntimeState {
         sync_status: SyncStatus,
     ) -> Self {
         Self {
+            sync_changes: tokio::sync::watch::channel(()).0,
             inner: RwLock::new(RuntimeStateInner {
                 active_profile,
                 running_games: None,
@@ -209,6 +211,12 @@ impl RuntimeState {
     pub fn set_sync_status(&self, sync_status: SyncStatus) {
         let mut inner = self.inner.write().expect("RuntimeState lock poisoned");
         inner.sync_status = sync_status;
+        drop(inner);
+        self.sync_changes.send_replace(());
+    }
+
+    pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<()> {
+        self.sync_changes.subscribe()
     }
 }
 
@@ -238,6 +246,10 @@ impl Settings {
     pub fn data(&self) -> SettingsData {
         let inner = self.inner.read().expect("Settings lock poisoned");
         inner.data.clone()
+    }
+
+    pub fn replace_data(&self, data: SettingsData) {
+        self.inner.write().expect("Settings lock poisoned").data = data;
     }
 
     pub fn set_repository(&self, url: Option<String>, path: Option<PathBuf>) {
