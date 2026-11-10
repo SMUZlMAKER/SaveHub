@@ -2,34 +2,93 @@
 
 Важно: проект настроен на LF (`\n`), через `.gitattributes` включена конвертация к `LF`.
 
-## Про rust-проект
-
-### Сборка
-
-```bash
-cargo build
-```
-
-### Запуск
-
-```
-./target/debug/savehub
-```
-
 ## Про фронтенд (Tauri + Svelte)
 
 Фронтенд лежит во `frontend/`: Svelte 5 + TypeScript + Vite. Конфиг Tauri — `tauri.conf.json` в корне репозитория.
 
-Нужны Rust (toolchain `msvc` на Windows), Node.js и WebView2 (в Windows 10/11 уже есть).
+Нужны Rust (toolchain `msvc` на Windows), Node.js 24 и WebView2.
+
+### Запуск для разработки
+
+Из корня репозитория:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run tauri dev     # vite dev-сервер + rust-приложение с hot reload фронта
-npm run tauri build   # релизная сборка и инсталлятор
 ```
 
 Окно закрывается в трей; выйти — через пункт «Выход» в меню иконки в трее.
+
+### Проверки
+
+Из корня репозитория:
+
+```bash
+cd frontend
+npm ci
+npm run check
+npm run build
+cd ..
+cargo test --locked
+```
+
+Перед Rust-тестами собираем фронтенд для встраиваемых ресурсов Tauri.
+
+### Windows-установщик
+
+Запускать из **Windows PowerShell/CMD**, с Windows-версиями Node.js и Rust MSVC
+и установленными Visual Studio Build Tools с компонентами C++.
+Обычная сборка в WSL создаёт Linux-приложение. Для Windows используйте эти команды
+в Windows или ручной запуск GitHub Actions.
+
+Из корня репозитория:
+
+```powershell
+cd frontend
+npm ci
+npm run tauri -- build --bundles nsis -- --locked
+```
+
+Tauri сам собирает фронтенд, Rust-приложение и NSIS-установщик.
+Результат относительно **корня репозитория**: `target/release/bundle/nsis/*-setup.exe`.
+Каталог называется `bundle`, без `s`, и появляется на этапе упаковки.
+При явном `--target` путь — `target/<target-triple>/release/bundle/nsis/`;
+при переопределении `CARGO_TARGET_DIR` вместо `target/` используется указанная директория.
+
+`cargo build` собирает только Rust-код, `npm run build` — только фронтенд;
+установщик эти команды не создают. С `--no-bundle` упаковка также пропускается.
+После успешной упаковки Tauri выводит путь к `setup.exe` в конце лога.
+
+NSIS устанавливает приложение для текущего пользователя. Если WebView2 отсутствует,
+установщик скачивает его bootstrapper: для этого потребуется интернет. Сборки пока без подписи.
+
+### CI и выпуск Windows-установщика
+
+Workflow `.github/workflows/windows.yml` выполняется на Windows x64:
+
+- В PR и после push в `main`: проверка Svelte/TypeScript, сборка фронтенда,
+  `cargo test --locked` и release-сборка приложения без упаковки.
+- Вручную: **Actions → Windows CI and release → Run workflow**, выбрать ветку.
+  После проверок собирается NSIS `setup.exe` и публикуется GitHub Release.
+  Для `main` это обычный релиз, для остальных веток — prerelease.
+- Из открытого PR: оставить отдельный комментарий `/prerelease` без другого текста.
+  Нужен write-доступ; поддерживаются ветки этого репозитория, но не форки.
+  Собирается SHA головы PR на момент обработки команды, результат всегда prerelease.
+  Ссылка на релиз появляется в Summary job публикации в Actions; бот в PR не пишет.
+
+Для ручного запуска и команды из PR workflow сначала должен попасть в default-ветку.
+Личный GitHub-токен и дополнительные secrets для CI не нужны: используется `GITHUB_TOKEN`.
+Право `contents: write` есть только у отдельной job публикации, которая не исполняет код PR.
+Настройки организации/репозитория должны разрешать GitHub Actions создавать релизы.
+
+Каждый выпуск получает уникальный тег `build-<run_id>-<run_attempt>` на собранном коммите.
+Версии в `Cargo.toml` и `tauri.conf.json` должны совпадать; CI их не увеличивает.
+В релизе указаны SHA коммита, ссылка на сборку и SHA256 установщика.
+Установщик также доступен в Actions artifacts 14 дней. При ошибке загрузки останется
+неопубликованный draft; повторный запуск создаст новый выпуск с новым тегом.
+
+MSI, автообновление и автозапуск в этот workflow не входят.
 
 ### Контракт фронт ↔ бэк
 

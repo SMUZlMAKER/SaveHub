@@ -1,0 +1,173 @@
+name: Windows CI and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  source:
+    name: Select source
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request && github.event.comment.body == '/prerelease')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      publish: ${{ steps.source.outputs.publish }}
+      prerelease: ${{ steps.source.outputs.prerelease }}
+    steps:
+      - uses: actions/github-script@v7
+        id: source
+        with:
+          script: |
+            let sha = context.sha;
+            let publish = context.eventName === 'workflow_dispatch';
+            let prerelease = context.ref !== 'refs/heads/main';
+            if (context.eventName === 'workflow_dispatch' && !context.ref.startsWith('refs/heads/')) {
+              throw new Error('Select a branch, not a tag.');
+            }
+            if (context.eventName === 'issue_comment') {
+              const { data: access } = await github.rest.repos.getCollaboratorPermissionLevel({
+                ...context.repo, username: context.payload.comment.user.login,
+              });
+              if (!['admin', 'maintain', 'write'].includes(access.permission)) {
+                throw new Error('Only collaborators with write access can request a prerelease.');
+              }
+              const { data: pr } = await github.rest.pulls.get({
+                ...context.repo, pull_number: context.issue.number,
+              });
+              if (pr.state !== 'open' || pr.head.repo?.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+                throw new Error('Prereleases require an open PR from a branch in this repository.');
+              }
+              sha = pr.head.sha;
+              publish = true;
+              prerelease = true;
+            }
+            core.setOutput('sha', sha);
+            core.setOutput('publish', String(publish));
+            core.setOutput('prerelease', String(prerelease));
+            await core.summary.addHeading('Source')
+              .addRaw(`Commit: ${sha}\n\nPublish: ${publish}; prerelease: ${prerelease}`)
+              .write();
+
+  build:
+    name: Windows x64 build and tests
+    needs: source
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Set up Rust MSVC
+        run: rustup default stable-x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Check frontend types
+        working-directory: frontend
+        run: npm run check
+      - name: Check application versions
+        shell: pwsh
+        run: |
+          $cargo = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = ($cargo.packages | Where-Object name -eq 'savehub').version
+          $config = Get-Content tauri.conf.json -Raw | ConvertFrom-Json
+          if ($version -ne $config.version) {
+            throw "Cargo version ($version) differs from Tauri version ($($config.version))"
+          }
+      - name: Build frontend assets for Rust tests
+        working-directory: frontend
+        run: npm run build
+      - name: Run Rust unit and documentation tests
+        run: cargo test --locked
+      - name: Build release application and installer
+        if: needs.source.outputs.publish == 'true'
+        working-directory: frontend
+        run: npm run tauri -- build --bundles nsis --ci -- --locked
+      - name: Build application without installer
+        if: needs.source.outputs.publish != 'true'
+        working-directory: frontend
+        run: npm run tauri -- build --no-bundle --ci -- --locked
+      - name: Upload Windows installer
+        if: needs.source.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-installer
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub release
+    needs: [source, build]
+    if: needs.source.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      # Never check out or execute PR code in the job with write permissions.
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64-installer
+          path: installer
+      - name: Publish installer
+        uses: actions/github-script@v7
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          PRERELEASE: ${{ needs.source.outputs.prerelease }}
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+            const crypto = require('node:crypto');
+            const prerelease = process.env.PRERELEASE === 'true';
+            const tag = `build-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            const files = (await fs.readdir('installer')).filter(name => name.endsWith('-setup.exe'));
+            if (files.length !== 1) throw new Error('Expected exactly one Windows installer.');
+            const name = files[0];
+            const data = await fs.readFile(`installer/${name}`);
+            const checksum = crypto.createHash('sha256').update(data).digest('hex');
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { data: release } = await github.rest.repos.createRelease({
+              ...context.repo,
+              tag_name: tag,
+              target_commitish: process.env.SOURCE_SHA,
+              name: `SaveHub Windows x64 ${prerelease ? 'preview' : 'release'} ${tag}`,
+              body: `Commit: ${process.env.SOURCE_SHA}\n\nBuild: ${runUrl}\n\nSHA256 (${name}): \`${checksum}\``,
+              draft: true,
+              prerelease,
+              make_latest: 'false',
+            });
+            await github.rest.repos.uploadReleaseAsset({
+              ...context.repo, release_id: release.id, name, data,
+              headers: { 'content-type': 'application/octet-stream' },
+            });
+            const { data: published } = await github.rest.repos.updateRelease({
+              ...context.repo, release_id: release.id, draft: false,
+              make_latest: prerelease ? 'false' : 'true',
+            });
+            await core.summary.addLink('Download release', published.html_url).write();
