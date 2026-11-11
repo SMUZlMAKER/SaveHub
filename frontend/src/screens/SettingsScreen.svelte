@@ -12,15 +12,13 @@
   let loadError = $state<string | null>(null)
   let token = $state('')
 
-  const toggles: { key: 'syncAfterSession' | 'syncWhileGaming' | 'autoSwitchProfile' | 'askProfileBeforeLaunch'; title: string; hint: string }[] = [
-    { key: 'askProfileBeforeLaunch', title: 'Выбирать профиль перед запуском игры', hint: 'Показывать выбор, если профилей больше одного' },
-    { key: 'syncAfterSession', title: 'Синхронизировать после каждой сессии', hint: 'Когда игра закрывается' },
-    { key: 'syncWhileGaming', title: 'Синхронизировать во время игры', hint: 'Может мешать игре, если сохранения большие' },
-    {
-      key: 'autoSwitchProfile',
-      title: 'Автопереключение профиля',
-      hint: 'Профиль того, кто последним запускал игру',
-    },
+  const syncToggles: { key: 'syncAfterSession' | 'syncWhileGaming'; title: string; hint: string }[] = [
+    { key: 'syncAfterSession', title: 'Отправлять сохранения в GitHub после выхода из игры', hint: 'Изменённые сохранения текущего профиля на этом ПК → репозиторий сохранений' },
+    { key: 'syncWhileGaming', title: 'Отправлять сохранения в GitHub во время игры', hint: 'Изменённые сохранения текущего профиля на этом ПК → репозиторий. Запись файлов игрой может мешать отправке.' },
+  ]
+  const launchToggles: { key: 'askProfileBeforeLaunch' | 'autoSwitchProfile'; title: string; hint: string }[] = [
+    { key: 'askProfileBeforeLaunch', title: 'Выбирать профиль перед запуском игры', hint: 'Показывать диалог выбора, если профилей больше одного' },
+    { key: 'autoSwitchProfile', title: 'Выбирать профиль последнего игрока', hint: 'Запланированное автоматическое переключение сохранений; сейчас недоступно' },
   ]
 
   async function load() {
@@ -66,7 +64,8 @@
 <Loadable {loading} error={loadError}>
   {#if settings}
     <form onsubmit={save}>
-      <h3>GitHub</h3>
+      <h3>Хранилище сохранений в GitHub</h3>
+      <p class="muted">Репозиторий для игровых сохранений и профилей. Обновления самого SaveHub настраиваются отдельно выше.</p>
       <label class="field">
         <span class="muted">Репозиторий для сохранений</span>
         <input bind:value={settings.repoUrl} placeholder="https://github.com/user/saves" />
@@ -76,18 +75,18 @@
         <input bind:value={settings.localRepoPath} />
       </label>
 
-      <h3>Синхронизация</h3>
+      <h3>Передача сохранений между ПК</h3>
+      <p class="muted">Автоматическая отправка и получение сохранений ещё не реализованы. Эти параметры сохраняются для будущего подключения синхронизации.</p>
       <ul class="list settings-list">
-        {#each toggles as toggle (toggle.key)}
-          <li class="row">
-            <label class="grow toggle">
-              <span>
-                <span>{toggle.title}</span>
-                <span class="muted block">{toggle.hint}</span>
-              </span>
-              <input type="checkbox" bind:checked={settings[toggle.key]} />
-            </label>
-          </li>
+        {#each syncToggles as toggle (toggle.key)}
+          <li class="row"><label class="grow toggle"><span><span>{toggle.title}</span><span class="muted block">{toggle.hint}</span></span><input type="checkbox" bind:checked={settings[toggle.key]} disabled /></label></li>
+        {/each}
+      </ul>
+      <p class="muted">Проверка и получение более свежих сохранений из GitHub перед запуском игры пока недоступны. Отдельной работающей настройки для этого ещё нет.</p>
+      <h3>Профиль при запуске игры</h3>
+      <ul class="list settings-list">
+        {#each launchToggles as toggle (toggle.key)}
+          <li class="row"><label class="grow toggle"><span><span>{toggle.title}</span><span class="muted block">{toggle.hint}</span></span><input type="checkbox" bind:checked={settings[toggle.key]} disabled={toggle.key === 'autoSwitchProfile'} /></label></li>
         {/each}
       </ul>
 
@@ -107,4 +106,5 @@
   {/if}
 </Loadable>
 
-<DevNote file="src/api/settings.rs" commands={['get_settings', 'update_settings', 'set_github_token']} />
+<DevNote file="src/api/settings.rs" commands={['get_settings', 'update_settings', 'set_github_token']}
+  notes={['RepoWorker, снапшоты и переключение сохранений пока не подключены; запись настройки не означает выполнения синхронизации.']} />

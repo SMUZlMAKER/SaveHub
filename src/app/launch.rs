@@ -116,9 +116,6 @@ async fn begin_internal(
         ..Default::default()
     };
     state.publish(app, status);
-    if dialog {
-        show_dialog(app)?;
-    }
     let result = prepare(app, game_id).await;
     if state.cancel_requested.load(Ordering::SeqCst) {
         return Ok(state.status());
@@ -161,27 +158,11 @@ async fn prepare(app: &tauri::AppHandle, game_id: GameId) -> ApiResult<LaunchSta
             is_active: Some(p.id) == plan.active_profile,
         })
         .collect();
-    status.warnings.push("Актуальность сохранений пока не проверяется; одновременная игра на другом ПК не блокируется. Будет использована текущая локальная папка сохранений.".into());
     let updates = app.state::<crate::app::updates::Updates>();
-    if updates.status().configured {
-        match updates.check(app).await {
-            Ok(update) if update.phase == "error" => status.warnings.push(
-                update
-                    .error
-                    .unwrap_or_else(|| "Не удалось проверить обновления SaveHub".into()),
-            ),
-            Ok(update) if update.version.is_some() => status.warnings.push(format!(
-                "Доступно обновление SaveHub {}. Установить его можно в настройках.",
-                update.version.unwrap()
-            )),
-            Ok(_) => (),
-            Err(error) => status.warnings.push(error_message(&error)),
-        }
-    } else {
-        status.warnings.push(
-            "Проверка обновлений SaveHub недоступна: ключ подписи не настроен в этой сборке."
-                .into(),
-        );
+    if updates.check_preferences().check_before_game_launch && updates.status().configured {
+        // Optional application maintenance, separate from save synchronization.
+        // The updater publishes its own status; a failed check must not block a game.
+        let _ = updates.check(app).await;
     }
     if state.cancel_requested.load(Ordering::SeqCst) {
         return Ok(state.status());
@@ -189,6 +170,9 @@ async fn prepare(app: &tauri::AppHandle, game_id: GameId) -> ApiResult<LaunchSta
     if plan.needs_profile {
         status.phase = "awaitingProfile".into();
         state.publish(app, status);
+        if state.dialog_mode.load(Ordering::SeqCst) && state.status().phase == "awaitingProfile" {
+            show_dialog(app)?;
+        }
         Ok(state.status())
     } else {
         state.publish(app, status);

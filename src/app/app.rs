@@ -10,6 +10,8 @@ use crate::domain::{
 use crate::services::{game::GameService, profile::ProfileService, settings::SettingsService};
 
 pub fn start() {
+    crate::adapters::app_identity::initialize()
+        .expect("Не удалось настроить идентификацию SaveHub в Windows");
     // TODO: прочитать конфигурацию, создать хранилища и сервисы, запустить RepoWorker (см. app/mod.rs)
     tauri::Builder::default()
         .manage(crate::app::launch::Launches::default())

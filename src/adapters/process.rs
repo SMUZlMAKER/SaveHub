@@ -16,6 +16,12 @@ pub fn spawn(
 ) -> AdapterResult<Child> {
     let mut command = Command::new(executable);
     command.args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     if let Some(directory) = working_dir {
         command.current_dir(directory);
     }

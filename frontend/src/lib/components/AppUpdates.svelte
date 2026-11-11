@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DevNote from './DevNote.svelte'
   import { onMount } from 'svelte'
   import { api, events, subscribe, describeError } from '../api'
   import { notice } from '../notice.svelte'
@@ -41,13 +42,20 @@
   }
 </script>
 
-<h3>Запуск и обновления</h3>
+<h3>Запуск SaveHub</h3>
 {#if error}<p role="alert">{error}</p>{/if}
 {#if preferences}
   <ul class="list settings-list">
     <li class="row"><label class="grow toggle"><span>Запускать SaveHub при входе в Windows</span><input type="checkbox" bind:checked={preferences.launchAtLogin} disabled={saving} /></label></li>
-    <li class="row"><label class="grow toggle"><span>Проверять обновления при запуске</span><input type="checkbox" bind:checked={preferences.checkOnStartup} disabled={saving} /></label></li>
-    <li class="row"><label class="grow toggle"><span>Проверять обновления каждые 6 часов</span><input type="checkbox" bind:checked={preferences.checkPeriodically} disabled={saving} /></label></li>
+  </ul>
+  <h3>Обновления SaveHub</h3>
+  <p class="muted">Новые версии самого приложения. Эти проверки не синхронизируют сохранения игр.</p>
+  <ul class="list settings-list">
+    <li class="row"><label class="grow toggle"><span>Проверять обновления SaveHub при обычном запуске приложения</span><input type="checkbox" bind:checked={preferences.checkOnStartup} disabled={saving} /></label></li>
+    <li class="row"><label class="grow toggle"><span>Проверять обновления SaveHub каждые 6 часов</span><input type="checkbox" bind:checked={preferences.checkPeriodically} disabled={saving} /></label></li>
+  </ul>
+  <ul class="list settings-list">
+    <li class="row"><label class="grow toggle"><span><span>Проверять обновления SaveHub перед запуском игры</span><span class="muted block">По умолчанию выключено. Проверка может задержать запуск; установка выполняется отдельно.</span></span><input type="checkbox" bind:checked={preferences.checkBeforeGameLaunch} disabled={saving} /></label></li>
   </ul>
   <div class="actions">
     <button class="primary" onclick={save} disabled={saving}>{saving ? 'Сохранение…' : 'Сохранить параметры запуска'}</button>
@@ -56,7 +64,7 @@
 {#if status}
   <p class="muted">Установлена версия {status.currentVersion}. Канал: стабильные релизы GitHub.</p>
   {#if !status.configured}
-    <p>В этой сборке обновления недоступны: ключ проверки подписи ещё не настроен.</p>
+    <p>Автоматические обновления недоступны в этой сборке.</p>
   {/if}
   <p role="status">
     {#if status.phase === 'checking'}Проверяем обновления…
@@ -77,3 +85,6 @@
     <div class="actions"><button class="primary" onclick={install} disabled={working}>Установить и перезапустить</button><button onclick={() => { confirming = false }}>Отмена</button></div>
   {/if}
 {/if}
+
+<DevNote file="src/app/updates.rs" commands={['get_app_preferences', 'save_app_preferences', 'check_for_updates']}
+  notes={status && !status.configured ? ['Не настроен публичный ключ подписи обновлений. Проверки пропускаются, запуск игры не блокируется.'] : []} />

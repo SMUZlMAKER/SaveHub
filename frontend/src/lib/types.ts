@@ -119,6 +119,7 @@ export interface AppPreferences {
   launchAtLogin: boolean;
   checkOnStartup: boolean;
   checkPeriodically: boolean;
+  checkBeforeGameLaunch: boolean;
 }
 export interface UpdateStatus {
   currentVersion: string;

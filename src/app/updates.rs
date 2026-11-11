@@ -65,6 +65,7 @@ impl Updates {
             launch_at_login: app.autolaunch().is_enabled().map_err(internal)?,
             check_on_startup: p.check_on_startup,
             check_periodically: p.check_periodically,
+            check_before_game_launch: p.check_before_game_launch,
         })
     }
     pub fn save(&self, app: &tauri::AppHandle, p: Preferences, launch: bool) -> ApiResult<()> {
@@ -176,13 +177,16 @@ mod tests {
     fn preferences_allow_missing_fields_and_roundtrip() {
         let defaults: Preferences = serde_json::from_str("{}").unwrap();
         assert!(defaults.check_on_startup && defaults.check_periodically);
+        assert!(!defaults.check_before_game_launch);
         let p = Preferences {
             check_on_startup: false,
             check_periodically: true,
+            check_before_game_launch: true,
         };
         let restored: Preferences =
             serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
         assert!(!restored.check_on_startup && restored.check_periodically);
+        assert!(restored.check_before_game_launch);
     }
 }
 

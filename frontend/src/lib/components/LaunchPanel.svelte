@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, describeError, events, subscribe } from '../api'
+  import DevNote from './DevNote.svelte'
   import type { LaunchStatus } from '../types'
   let { compact = false }: { compact?: boolean } = $props()
   let status = $state<LaunchStatus | null>(null)
@@ -35,10 +36,10 @@
   }
 </script>
 
-{#if status && status.phase !== 'idle'}
+{#if status && (status.phase === 'awaitingProfile' || status.error || status.monitorError)}
   <section class="card launch-panel" class:compact aria-label="Запуск игры" aria-live="polite">
     <h3>{status.gameName ?? 'Запуск через SaveHub'}</h3>
-    {#if status.phase === 'preparing'}<p role="status">Подготавливаем запуск и проверяем обновления SaveHub…</p>
+    {#if status.phase === 'preparing'}<p role="status">Подготавливаем запуск…</p>
     {:else if status.phase === 'starting'}<p role="status">Запускаем игру…</p>
     {:else if status.phase === 'awaitingProfile'}
       <label class="field"><span>Профиль для запуска</span>
@@ -53,19 +54,21 @@
     {:else if status.phase === 'running'}<p role="status">Игра запущена{status.pid ? ` · PID ${status.pid}` : ''}. {status.monitorError ? 'Состояние процесса временно неизвестно.' : 'SaveHub следит за процессом.'}</p>
     {:else if status.phase === 'stopped'}<p role="status">Процесс игры завершён.</p>
     {:else if status.phase === 'cancelled'}<p role="status">Запуск отменён.</p>{/if}
-    {#if status.warnings.length}
-      {#if compact}<details><summary>Информация о запуске</summary><ul>{#each status.warnings as warning}<li class="muted">{warning}</li>{/each}</ul></details>
-      {:else}<ul>{#each status.warnings as warning}<li class="muted">{warning}</li>{/each}</ul>{/if}
-    {/if}
     {#if status.monitorError}<p class="error" role="alert">{status.monitorError}</p>{/if}
     {#if error || status.error}<p class="error" role="alert">{error || status.error}</p>{/if}
   </section>
 {:else if error}<p class="error" role="alert">{error}</p>{/if}
 
+{#if !compact && status && status.phase !== 'idle'}
+  <DevNote file="src/workflows/launch_game.rs" commands={['begin_game_launch', 'confirm_game_launch']}
+    notes={[
+      `${status.gameName ?? 'Игра'}: ${status.phase}${status.pid ? ` · PID ${status.pid}` : ''}`,
+      'Проверка актуальности сохранений и блокировка сессии на другом ПК пока не реализованы; используются текущие локальные файлы.',
+    ]} />
+{/if}
+
 <style>
   .launch-panel { margin: 16px 24px; padding: 16px; }
   .compact { margin: 0; }
-  details { margin-top: 12px; }
   h3 { margin-top: 0; }
-  li + li { margin-top: 6px; }
 </style>

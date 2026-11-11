@@ -77,6 +77,7 @@ export const api = {
       preferences: {
         checkOnStartup: preferences.checkOnStartup,
         checkPeriodically: preferences.checkPeriodically,
+        checkBeforeGameLaunch: preferences.checkBeforeGameLaunch,
       },
       launchAtLogin: preferences.launchAtLogin,
     }),

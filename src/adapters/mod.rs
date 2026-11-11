@@ -19,3 +19,5 @@ pub mod watcher;
 
 pub mod save_paths;
 pub mod game_paths;
+
+pub mod app_identity;
