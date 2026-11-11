@@ -8,7 +8,8 @@ use super::{ApiError, ApiResult};
 #[serde(rename_all = "camelCase")]
 pub struct SyncStatusDto {
     pub state: SyncState,
-    /// Unix-время последней успешной синхронизации в миллисекундах.
+    /// Unix-время последнего успешного fetch/push без ошибок и ожидающих отправки коммитов.
+    /// В миллисекундах; не означает применение удалённых сохранений.
     pub last_sync_at: Option<u64>,
     /// Текст ошибки, если `state = Error`.
     pub error: Option<String>,

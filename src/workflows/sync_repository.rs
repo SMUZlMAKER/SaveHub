@@ -143,9 +143,10 @@ impl SyncRepository {
             outcome.fetch = Some(result);
         }
 
-        let pushed = matches!(outcome.push, Some(Ok(())));
+        let exchanged =
+            matches!(outcome.push, Some(Ok(()))) || matches!(outcome.fetch, Some(Ok(())));
         // Publish under the lock so a newer operation cannot be overwritten.
-        self.publish_result(None, pushed);
+        self.publish_result(None, exchanged);
         drop(guard);
         Ok(SyncAttempt::Completed(outcome))
     }
@@ -201,15 +202,14 @@ impl SyncRepository {
         Ok(commit.is_some())
     }
 
-    // Fetch only updates refs, so only a successful push advances last_sync_at.
-    fn publish_result(&self, failure: Option<&ServiceError>, pushed: bool) {
+    fn publish_result(&self, failure: Option<&ServiceError>, exchanged: bool) {
         let previous = self.runtime.sync_status();
         let error = failure
             .map(|error| format!("{error:?}"))
             .or_else(|| self.checkpoint_error.clone())
             .or_else(|| self.push_error.clone())
             .or_else(|| self.fetch_error.clone());
-        let completed = pushed && error.is_none() && self.pending_push.is_empty();
+        let completed = exchanged && error.is_none() && self.pending_push.is_empty();
 
         self.runtime.set_sync_status(SyncStatus {
             state: if error.is_some() {

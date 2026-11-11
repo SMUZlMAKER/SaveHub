@@ -154,7 +154,9 @@ pub fn start() {
                 settings.clone(),
             ));
             let repo_service = Arc::new(RepoService::new(
-                catalog.clone(), runtime.clone(), settings.clone(),
+                catalog.clone(),
+                runtime.clone(),
+                settings.clone(),
             ));
             let process_service = Arc::new(crate::services::process::ProcessService::new(
                 catalog.clone(),

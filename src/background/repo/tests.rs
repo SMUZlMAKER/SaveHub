@@ -396,7 +396,7 @@ fn clean_scan_skips_push_but_discovers_external_commits_later() {
     let (mut worker, runtime, _) = engine(repo.clone());
     worker.tick(Instant::now(), false).unwrap();
     assert_eq!(repo.take_calls(), ["checkpoint:a", "fetch"]);
-    assert!(runtime.sync_status().last_sync_at.is_none());
+    assert!(runtime.sync_status().last_sync_at.is_some());
 
     repo.clean.store(false, Ordering::SeqCst);
     worker.tick(worker.scan_due, false).unwrap();
@@ -522,14 +522,58 @@ fn empty_request_does_not_publish_success() {
 }
 
 #[test]
-fn missing_profile_does_not_publish_successful_upload() {
+fn successful_fetch_alone_updates_last_sync_but_failure_preserves_it() {
+    let repo = Arc::new(FakeRepo::default());
+    let runtime = runtime();
+    let mut sync = SyncRepository::new(repo.clone(), runtime.clone(), Arc::new(Mutex::new(())));
+    let fetch = || SyncRequest {
+        fetch: true,
+        ..SyncRequest::default()
+    };
+
+    sync.execute(fetch()).unwrap();
+    assert_eq!(repo.take_calls(), ["fetch"]);
+    let previous = runtime.sync_status().last_sync_at;
+    assert!(previous.is_some());
+    assert!(matches!(runtime.sync_status().state, SyncState::Idle));
+
+    repo.fail_fetch.store(true, Ordering::SeqCst);
+    sync.execute(fetch()).unwrap();
+    assert_eq!(runtime.sync_status().last_sync_at, previous);
+    assert!(matches!(runtime.sync_status().state, SyncState::Error));
+}
+
+#[test]
+fn successful_fetch_does_not_publish_sync_with_pending_push() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.fail_push.store(true, Ordering::SeqCst);
+    let (mut worker, runtime, _) = engine(repo.clone());
+    assert!(worker.tick(Instant::now(), false).is_err());
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a", "fetch"]);
+    assert!(worker.sync.has_pending_push());
+    assert!(runtime.sync_status().last_sync_at.is_none());
+
+    worker
+        .sync
+        .execute(SyncRequest {
+            fetch: true,
+            ..SyncRequest::default()
+        })
+        .unwrap();
+    assert_eq!(repo.take_calls(), ["fetch"]);
+    assert!(runtime.sync_status().last_sync_at.is_none());
+    assert!(matches!(runtime.sync_status().state, SyncState::Error));
+}
+
+#[test]
+fn fetch_without_active_profile_updates_last_sync() {
     let repo = Arc::new(FakeRepo::default());
     let (mut worker, runtime, _) = engine(repo.clone());
     runtime.set_active_profile(None).unwrap();
     worker.tick(Instant::now(), false).unwrap();
 
     assert_eq!(repo.take_calls(), ["fetch"]);
-    assert!(runtime.sync_status().last_sync_at.is_none());
+    assert!(runtime.sync_status().last_sync_at.is_some());
 }
 
 #[test]
@@ -665,7 +709,7 @@ fn changing_repository_does_not_send_pending_profiles_to_new_remote() {
     let status = runtime.sync_status();
     assert!(matches!(status.state, SyncState::Idle));
     assert!(status.error.is_none());
-    assert!(status.last_sync_at.is_none());
+    assert!(status.last_sync_at.is_some());
 }
 
 #[test]

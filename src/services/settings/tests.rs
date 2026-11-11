@@ -28,6 +28,7 @@ impl Fixture {
                     sync_after_session: false,
                     sync_while_gaming: false,
                     auto_switch_profile: false,
+                    ask_profile_before_launch: true,
                     start_minimized: false,
                 },
                 LocalConfig {
