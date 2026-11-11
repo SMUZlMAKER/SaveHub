@@ -2,6 +2,43 @@ use super::{AdapterError, AdapterResult};
 
 const TARGET: &str = "SaveHub/github-token";
 
+/// Прочитать токен только для использования внутри бэкенда.
+/// Отсутствующая запись — None; ошибки доступа и формата возвращаются вызывающему.
+#[cfg(windows)]
+pub fn get_token() -> AdapterResult<Option<String>> {
+    use std::{ffi::c_void, ptr, slice};
+    use windows_sys::Win32::Security::Credentials::{CRED_TYPE_GENERIC, CredFree, CredReadW};
+
+    let target: Vec<u16> = TARGET.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut credential = ptr::null_mut();
+    if unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) } == 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(1168) => Ok(None),
+            _ => Err(AdapterError::Credentials(error.to_string())),
+        };
+    }
+
+    // CredReadW возвращает буфер, действительный до CredFree. Копируем строку
+    // перед освобождением; содержимое токена не включаем в ошибки.
+    let result = unsafe {
+        let entry = &*credential;
+        if entry.CredentialBlobSize == 0 {
+            Ok(Some(String::new()))
+        } else if entry.CredentialBlob.is_null() {
+            Err(AdapterError::Credentials("Пустой указатель токена".into()))
+        } else {
+            let bytes =
+                slice::from_raw_parts(entry.CredentialBlob, entry.CredentialBlobSize as usize);
+            std::str::from_utf8(bytes)
+                .map(|token| Some(token.to_owned()))
+                .map_err(|_| AdapterError::Credentials("Токен имеет неверный формат UTF-8".into()))
+        }
+    };
+    unsafe { CredFree(credential as *const c_void) };
+    result
+}
+
 #[cfg(windows)]
 pub fn has_token() -> AdapterResult<bool> {
     use std::{ffi::c_void, ptr};
@@ -62,6 +99,11 @@ pub fn set_token(token: &str) -> AdapterResult<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn get_token() -> AdapterResult<Option<String>> {
+    Err(AdapterError::UnsupportedPlatform)
 }
 
 #[cfg(not(windows))]

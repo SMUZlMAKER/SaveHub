@@ -44,12 +44,14 @@
 <h3>Запуск и обновления</h3>
 {#if error}<p role="alert">{error}</p>{/if}
 {#if preferences}
-  <ul class="list">
+  <ul class="list settings-list">
     <li class="row"><label class="grow toggle"><span>Запускать SaveHub при входе в Windows</span><input type="checkbox" bind:checked={preferences.launchAtLogin} disabled={saving} /></label></li>
     <li class="row"><label class="grow toggle"><span>Проверять обновления при запуске</span><input type="checkbox" bind:checked={preferences.checkOnStartup} disabled={saving} /></label></li>
     <li class="row"><label class="grow toggle"><span>Проверять обновления каждые 6 часов</span><input type="checkbox" bind:checked={preferences.checkPeriodically} disabled={saving} /></label></li>
   </ul>
-  <button onclick={save} disabled={saving}>{saving ? 'Сохранение…' : 'Сохранить параметры запуска'}</button>
+  <div class="actions">
+    <button class="primary" onclick={save} disabled={saving}>{saving ? 'Сохранение…' : 'Сохранить параметры запуска'}</button>
+  </div>
 {/if}
 {#if status}
   <p class="muted">Установлена версия {status.currentVersion}. Канал: стабильные релизы GitHub.</p>

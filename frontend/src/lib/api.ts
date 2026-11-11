@@ -10,6 +10,7 @@ import type {
   Conflict,
   ConflictResolution,
   Game,
+  GithubToken,
   Profile,
   Save,
   SaveChoice,
@@ -100,6 +101,7 @@ export const api = {
   // src/api/settings.rs
   getSettings: () => call<Settings>('get_settings'),
   updateSettings: (settings: Settings) => call<void>('update_settings', { settings }),
+  getGithubToken: () => call<GithubToken>('get_github_token'),
   setGithubToken: (token: string) => call<void>('set_github_token', { token }),
 }
 
