@@ -41,12 +41,13 @@ fn relative(path: &Path) -> AdapterResult<()> {
 /// Use only the supplied HTTPS token; an empty token allows unauthenticated access.
 fn callbacks(token: &str) -> git2::RemoteCallbacks<'_> {
     let mut callbacks = git2::RemoteCallbacks::new();
+    // TODO: Validate that the callback URL uses HTTPS and a trusted GitHub host before sending the token.
     callbacks.credentials(move |_, username, allowed| {
-        if allowed.contains(git2::CredentialType::USERNAME) {
-            return Cred::username(username.unwrap_or("git"));
-        }
         if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) && !token.is_empty() {
             return Cred::userpass_plaintext(username.unwrap_or("x-access-token"), token);
+        }
+        if allowed.contains(git2::CredentialType::USERNAME) {
+            return Cred::username(username.unwrap_or("git"));
         }
         Err(git2::Error::from_str(
             "Authentication requires a supplied HTTPS token",
