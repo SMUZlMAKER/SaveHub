@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "SaveHub",
         "width": 960,
         "height": 640,
@@ -22,6 +23,7 @@
       },
       {
         "label": "launch",
+        "create": false,
         "title": "Запуск игры — SaveHub",
         "url": "index.html?launch",
         "width": 480,
