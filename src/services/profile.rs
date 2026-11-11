@@ -1,20 +1,30 @@
-use super::{ServiceError, ServiceResult};
+use super::{ServiceError, ServiceResult, repo::RepoService};
 use crate::domain::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub struct ProfileService {
     catalog: Arc<Catalog>,
     runtime: Arc<RuntimeState>,
-    _settings: Arc<Settings>,
+    repo: Arc<RepoService>,
+    operations: Arc<Mutex<()>>,
 }
 
-#[allow(unused_variables)]
 impl ProfileService {
-    pub fn new(catalog: Arc<Catalog>, runtime: Arc<RuntimeState>, settings: Arc<Settings>) -> Self {
+    pub fn new(catalog: Arc<Catalog>, runtime: Arc<RuntimeState>, repo: Arc<RepoService>) -> Self {
+        Self::with_operations(catalog, runtime, repo, Arc::new(Mutex::new(())))
+    }
+
+    pub fn with_operations(
+        catalog: Arc<Catalog>,
+        runtime: Arc<RuntimeState>,
+        repo: Arc<RepoService>,
+        operations: Arc<Mutex<()>>,
+    ) -> Self {
         Self {
             catalog,
             runtime,
-            _settings: settings,
+            repo,
+            operations,
         }
     }
 
@@ -38,31 +48,23 @@ impl ProfileService {
 
     /// Создать профиль и его ветку; каталог игр общий.
     pub fn create(&self, name: &str) -> ServiceResult<Profile> {
-        // TODO Git создание ветки
-        if name.trim().is_empty() {
+        let _guard = self
+            .operations
+            .lock()
+            .map_err(|_| ServiceError::Conflict("Блокировка операций профиля повреждена".into()))?;
+        let name = name.trim();
+        if name.is_empty() {
             return Err(ServiceError::InvalidInput(
                 "Имя профиля не может быть пустым".into(),
             ));
         }
-        let name = name.trim().to_owned();
-        let profiles = self.catalog.profiles();
-        let base_branch = crate::utils::utils::name_to_branch(&name);
-        let branch = unique_branch(
-            &base_branch,
-            profiles.values().map(|profile| profile.branch.as_str()),
-        );
+        let branch = self.repo.create_profile_branch(name)?;
         let profile = Profile {
             id: uuid::Uuid::new_v4(),
-            branch, // TODO показывать имя ветки в UI
-            name,
+            branch,
+            name: name.to_owned(),
             last_played_game: None,
         };
-        if profiles.contains_key(&profile.id) {
-            return Err(ServiceError::InvalidInput(format!(
-                "Профиль уже существует: {}",
-                profile.name
-            )));
-        }
         self.catalog.add_profile(profile.clone());
         Ok(profile)
     }
@@ -84,11 +86,17 @@ impl ProfileService {
 
     /// Запретить удаление активного профиля.
     pub fn delete(&self, profile_id: &ProfileId) -> ServiceResult<()> {
+        let _guard = self
+            .operations
+            .lock()
+            .map_err(|_| ServiceError::Conflict("Блокировка операций профиля повреждена".into()))?;
+        self.get(profile_id)?;
         if self.runtime.active_profile().as_ref() == Some(profile_id) {
             return Err(ServiceError::InvalidInput(
                 "Активный профиль удалить нельзя".into(),
             ));
         }
+        self.repo.delete_profile(profile_id)?;
         if self.catalog.remove_profile(profile_id) {
             Ok(())
         } else {
@@ -98,6 +106,10 @@ impl ProfileService {
 
     /// Зафиксировать активный профиль после успешной смены сохранений.
     pub fn set_active(&self, profile_id: &ProfileId) -> ServiceResult<()> {
+        let _guard = self
+            .operations
+            .lock()
+            .map_err(|_| ServiceError::Conflict("Блокировка операций профиля повреждена".into()))?;
         if !self.catalog.profiles().contains_key(profile_id) {
             return Err(ServiceError::NotFound("Профиль не найден".into()));
         }
@@ -110,34 +122,359 @@ impl ProfileService {
     }
 }
 
-fn unique_branch<'a, I>(base: &str, branches: I) -> String
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let branches: std::collections::HashSet<&str> = branches.into_iter().collect();
-    if !branches.contains(base) {
-        return base.to_owned();
-    }
-
-    let mut index = 2;
-    loop {
-        let candidate = format!("{base}-{index}");
-        if !branches.contains(candidate.as_str()) {
-            return candidate;
-        }
-        index += 1;
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::unique_branch;
+    use super::*;
+    use std::{collections::HashMap, path::PathBuf};
+
+    struct Fixture {
+        root: PathBuf,
+        service: ProfileService,
+        settings: Arc<Settings>,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("savehub-profile-test-{}", uuid::Uuid::new_v4()));
+            git2::Repository::init(&root).unwrap();
+            let catalog = Arc::new(Catalog::new(HashMap::new(), HashMap::new()));
+            let runtime = Arc::new(RuntimeState::new(
+                None,
+                Vec::new(),
+                SyncStatus {
+                    state: SyncState::Idle,
+                    last_sync_at: None,
+                    error: None,
+                },
+            ));
+            let settings = Arc::new(Settings::new(
+                SettingsData {
+                    catalog_repo_url: None,
+                    ask_profile_before_launch: true,
+                    repo_url: Some("https://github.com/test/saves.git".into()),
+                    local_repo_path: Some(root.clone()),
+                    sync_after_session: false,
+                    sync_while_gaming: false,
+                    auto_switch_profile: false,
+                    start_minimized: false,
+                },
+                LocalConfig {
+                    machine_id: "test".into(),
+                    games: HashMap::new(),
+                },
+            ));
+            Self {
+                root,
+                service: ProfileService::new(
+                    catalog.clone(),
+                    runtime.clone(),
+                    Arc::new(RepoService::new(catalog, runtime, settings.clone())),
+                ),
+                settings,
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
 
     #[test]
-    fn adds_incrementing_suffix_for_duplicate_branches() {
-        let branches = ["main", "skyrim", "skyrim-2"];
+    fn deletion_removes_local_branch_and_catalog_but_preserves_history_and_remote() {
+        let fixture = Fixture::new();
+        fixture.service.runtime.set_running_games(Vec::new());
+        let profile = fixture.service.create("Delete me").unwrap();
+        let repository = git2::Repository::open(&fixture.root).unwrap();
+        let tip = repository
+            .find_branch(&profile.branch, git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .target()
+            .unwrap();
+        let remote_ref = format!("refs/remotes/origin/{}", profile.branch);
+        repository
+            .reference(&remote_ref, tip, false, "test")
+            .unwrap();
+        fixture.service.delete(&profile.id).unwrap();
+        assert!(fixture.service.get(&profile.id).is_err());
+        assert!(
+            repository
+                .find_branch(&profile.branch, git2::BranchType::Local)
+                .is_err()
+        );
+        assert_eq!(
+            repository.find_reference(&remote_ref).unwrap().target(),
+            Some(tip)
+        );
+        let archives: Vec<_> = repository
+            .references_glob("refs/savehub/deleted-profiles/*")
+            .unwrap()
+            .map(|item| item.unwrap().target().unwrap())
+            .collect();
+        assert!(archives.contains(&tip));
+    }
 
-        assert_eq!(unique_branch("fallout", branches), "fallout");
-        assert_eq!(unique_branch("skyrim", branches), "skyrim-3");
+    #[test]
+    fn deletion_archives_worktree_with_uncommitted_saves_and_previous_backups() {
+        let fixture = Fixture::new();
+        fixture.service.runtime.set_running_games(Vec::new());
+        let profile = fixture.service.create("Saves").unwrap();
+        fixture
+            .service
+            .repo
+            .checkout_profile(&profile.id.to_string())
+            .unwrap();
+        let tree = crate::adapters::git::prepare_worktree(
+            &fixture.root,
+            &profile.branch,
+            &profile.id.to_string(),
+        )
+        .unwrap();
+        std::fs::write(tree.join("save.dat"), b"uncommitted save\0").unwrap();
+        let metadata = crate::adapters::git::metadata_dir(&tree).unwrap();
+        std::fs::write(metadata.join("previous-backup"), b"older save").unwrap();
+        fixture.service.delete(&profile.id).unwrap();
+        assert!(!tree.exists());
+        assert!(fixture.service.get(&profile.id).is_err());
+        let repository = git2::Repository::open(&fixture.root).unwrap();
+        assert!(repository.worktrees().unwrap().is_empty());
+        assert!(
+            repository
+                .find_branch(&profile.branch, git2::BranchType::Local)
+                .is_err()
+        );
+        let archive = std::fs::read_dir(repository.commondir().join("savehub/deleted-profiles"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            std::fs::read(archive.join("worktree/save.dat")).unwrap(),
+            b"uncommitted save\0"
+        );
+        assert_eq!(
+            std::fs::read(archive.join("git-metadata/previous-backup")).unwrap(),
+            b"older save"
+        );
+    }
+
+    #[test]
+    fn failed_or_unsafe_deletion_preserves_profile_and_branch() {
+        let fixture = Fixture::new();
+        let profile = fixture.service.create("Protected").unwrap();
+        assert!(matches!(
+            fixture.service.delete(&profile.id),
+            Err(ServiceError::ProcessesUnknown)
+        ));
+        fixture
+            .service
+            .runtime
+            .set_running_games(vec![uuid::Uuid::new_v4()]);
+        assert!(matches!(
+            fixture.service.delete(&profile.id),
+            Err(ServiceError::GameRunning(_))
+        ));
+        fixture.service.runtime.set_running_games(Vec::new());
+        fixture.service.set_active(&profile.id).unwrap();
+        assert!(matches!(
+            fixture.service.delete(&profile.id),
+            Err(ServiceError::InvalidInput(_))
+        ));
+        fixture.service.runtime.set_active_profile(None).unwrap();
+        fixture
+            .settings
+            .set_repository(None, Some(fixture.root.join("missing")));
+        assert!(fixture.service.delete(&profile.id).is_err());
+        assert!(fixture.service.get(&profile.id).is_ok());
+        assert!(
+            crate::adapters::git::list_branches(&fixture.root)
+                .unwrap()
+                .contains(&profile.branch)
+        );
+    }
+
+    #[test]
+    fn deletion_preserves_an_unregistered_profile_directory() {
+        let fixture = Fixture::new();
+        fixture.service.runtime.set_running_games(Vec::new());
+        let profile = fixture.service.create("Unexpected directory").unwrap();
+        let repository = git2::Repository::open(&fixture.root).unwrap();
+        let tree = repository
+            .commondir()
+            .join("savehub/trees")
+            .join(profile.id.to_string());
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::write(tree.join("save.dat"), b"keep").unwrap();
+        assert!(fixture.service.delete(&profile.id).is_err());
+        assert!(fixture.service.get(&profile.id).is_ok());
+        assert_eq!(std::fs::read(tree.join("save.dat")).unwrap(), b"keep");
+        assert!(
+            repository
+                .find_branch(&profile.branch, git2::BranchType::Local)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn deletion_rejects_a_cached_foreign_lease() {
+        let fixture = Fixture::new();
+        fixture.service.runtime.set_running_games(Vec::new());
+        let profile = fixture.service.create("Busy").unwrap();
+        let bytes = serde_json::to_vec(
+            &serde_json::json!({"machine_id": "another-pc", "expires_at": u64::MAX}),
+        )
+        .unwrap();
+        let commit = crate::adapters::git::commit_files(
+            &fixture.root,
+            None,
+            &[("lease.json", &bytes)],
+            "lease",
+        )
+        .unwrap();
+        let repository = git2::Repository::open(&fixture.root).unwrap();
+        repository
+            .reference(
+                &format!("refs/remotes/origin/savehub/leases/{}", profile.id),
+                git2::Oid::from_str(&commit).unwrap(),
+                false,
+                "test",
+            )
+            .unwrap();
+        assert!(matches!(
+            fixture.service.delete(&profile.id),
+            Err(ServiceError::Conflict(_))
+        ));
+        assert!(fixture.service.get(&profile.id).is_ok());
+    }
+
+    #[test]
+    fn deletion_rejects_locked_worktree_and_preserves_files() {
+        let fixture = Fixture::new();
+        fixture.service.runtime.set_running_games(Vec::new());
+        let profile = fixture.service.create("Locked").unwrap();
+        fixture
+            .service
+            .repo
+            .checkout_profile(&profile.id.to_string())
+            .unwrap();
+        let tree = crate::adapters::git::prepare_worktree(
+            &fixture.root,
+            &profile.branch,
+            &profile.id.to_string(),
+        )
+        .unwrap();
+        let repository = git2::Repository::open(&tree).unwrap();
+        let worktree = git2::Worktree::open_from_repository(&repository).unwrap();
+        worktree.lock(Some("test lock")).unwrap();
+        assert!(fixture.service.delete(&profile.id).is_err());
+        assert!(tree.exists());
+        assert!(fixture.service.get(&profile.id).is_ok());
+        worktree.unlock().unwrap();
+    }
+    #[test]
+    fn creates_independent_history_without_touching_current_saves() {
+        let fixture = Fixture::new();
+        let original = crate::adapters::git::commit_files(
+            &fixture.root,
+            None,
+            &[("save.dat", b"existing saves")],
+            "original",
+        )
+        .unwrap();
+        crate::adapters::git::create_branch(&fixture.root, "existing", &original).unwrap();
+        crate::adapters::git::checkout(&fixture.root, "existing").unwrap();
+        std::fs::write(fixture.root.join("save.dat"), b"unsaved changes").unwrap();
+        let profile = fixture.service.create("  Новый профиль  ").unwrap();
+        assert_eq!(profile.name, "Новый профиль");
+        assert_eq!(profile.branch, "novyy-profil");
+        let repository = git2::Repository::open(&fixture.root).unwrap();
+        let commit = repository
+            .find_branch(&profile.branch, git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
+        assert_eq!(commit.parent_count(), 0);
+        assert!(commit.tree().unwrap().is_empty());
+        assert_eq!(crate::adapters::git::head(&fixture.root).unwrap(), original);
+        assert_eq!(
+            std::fs::read(fixture.root.join("save.dat")).unwrap(),
+            b"unsaved changes"
+        );
+        assert_eq!(
+            fixture.service.get(&profile.id).unwrap().branch,
+            profile.branch
+        );
+        assert_eq!(fixture.service.runtime.active_profile(), None);
+    }
+
+    #[test]
+    fn avoids_catalog_local_remote_and_namespace_collisions() {
+        let fixture = Fixture::new();
+        let commit = crate::adapters::git::commit_files(&fixture.root, None, &[], "root").unwrap();
+        crate::adapters::git::create_branch(&fixture.root, "test", &commit).unwrap();
+        let repository = git2::Repository::open(&fixture.root).unwrap();
+        repository
+            .reference(
+                "refs/remotes/origin/test-2",
+                git2::Oid::from_str(&commit).unwrap(),
+                false,
+                "test",
+            )
+            .unwrap();
+        fixture.service.catalog.add_profile(Profile {
+            id: uuid::Uuid::new_v4(),
+            name: "Other".into(),
+            branch: "test-3".into(),
+            last_played_game: None,
+        });
+        assert_eq!(fixture.service.create("Test").unwrap().branch, "test-4");
+        assert_eq!(fixture.service.create("Test").unwrap().branch, "test-5");
+        crate::adapters::git::create_branch(&fixture.root, "savehub/catalog", &commit).unwrap();
+        assert_eq!(
+            fixture.service.create("SaveHub").unwrap().branch,
+            "savehub-2"
+        );
+        assert_eq!(fixture.service.create("🎮").unwrap().branch, "profile");
+    }
+
+    #[test]
+    fn invalid_name_or_repository_does_not_add_profile() {
+        let fixture = Fixture::new();
+        assert!(matches!(
+            fixture.service.create("  "),
+            Err(ServiceError::InvalidInput(_))
+        ));
+        assert!(fixture.service.list().unwrap().is_empty());
+        fixture.settings.set_repository(None, None);
+        assert!(matches!(
+            fixture.service.create("Test"),
+            Err(ServiceError::InvalidInput(_))
+        ));
+        assert!(fixture.service.list().unwrap().is_empty());
+        fixture
+            .settings
+            .set_repository(None, Some(fixture.root.join("missing")));
+        assert!(matches!(
+            fixture.service.create("Test"),
+            Err(ServiceError::Adapter(_))
+        ));
+        assert!(fixture.service.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_creation_uses_distinct_branches() {
+        let fixture = Fixture::new();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| fixture.service.create("Same").unwrap());
+            let second = scope.spawn(|| fixture.service.create("Same").unwrap());
+            let first = first.join().unwrap();
+            let second = second.join().unwrap();
+            assert_ne!(first.branch, second.branch);
+            assert_ne!(first.id, second.id);
+        });
+        assert_eq!(fixture.service.list().unwrap().len(), 2);
     }
 }

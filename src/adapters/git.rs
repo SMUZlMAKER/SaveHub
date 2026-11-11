@@ -42,9 +42,16 @@ fn relative(path: &Path) -> AdapterResult<()> {
 fn callbacks(token: &str) -> git2::RemoteCallbacks<'_> {
     let mut callbacks = git2::RemoteCallbacks::new();
     callbacks.credentials(move |url, username, allowed| {
+        if !token.is_empty() && !trusted_github_url(url) {
+            return Err(git2::Error::from_str(
+                "Token authentication requires HTTPS on github.com",
+            ));
+        }
         if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) && !token.is_empty() {
             if !url.starts_with("https://github.com/") {
-                return Err(git2::Error::from_str("Token authentication is restricted to HTTPS github.com"));
+                return Err(git2::Error::from_str(
+                    "Token authentication is restricted to HTTPS github.com",
+                ));
             }
             return Cred::userpass_plaintext(username.unwrap_or("x-access-token"), token);
         }
@@ -56,6 +63,264 @@ fn callbacks(token: &str) -> git2::RemoteCallbacks<'_> {
         ))
     });
     callbacks
+}
+
+pub fn trusted_github_url(url: &str) -> bool {
+    url.strip_prefix("https://github.com/").is_some_and(|path| {
+        let parts: Vec<_> = path.split('/').collect();
+        parts.len() == 2
+            && parts.iter().all(|part| {
+                !part.is_empty()
+                    && *part != "."
+                    && *part != ".."
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            })
+    })
+}
+
+/// Attach an existing branch, or start an independent history. Never replace files.
+pub fn prepare_worktree(root: &Path, branch: &str, key: &str) -> AdapterResult<PathBuf> {
+    let repo = Repository::open(root)?;
+    let reference = format!("refs/heads/{branch}");
+    if !git2::Reference::is_valid_name(&reference) {
+        return Err(invalid("Invalid branch"));
+    }
+    if repo
+        .head()
+        .ok()
+        .and_then(|h| h.name().ok().map(str::to_owned))
+        .as_deref()
+        == Some(&reference)
+    {
+        return Ok(root.to_owned());
+    }
+    relative(Path::new(key))?;
+    let path = repo.commondir().join("savehub/trees").join(key);
+    if fs::exists(&path)? {
+        let tree = Repository::open(&path)?;
+        if tree.commondir().canonicalize()? != repo.commondir().canonicalize()?
+            || tree.head()?.name().ok() != Some(reference.as_str())
+        {
+            return Err(invalid("Unexpected worktree repository or branch"));
+        }
+        return Ok(path);
+    }
+    fs::create_dir_all(path.parent().ok_or_else(|| invalid("No worktree parent"))?)?;
+    let mut local = match repo.find_branch(branch, BranchType::Local) {
+        Ok(branch) => branch,
+        Err(e) if e.code() == ErrorCode::NotFound => {
+            let remote = format!("refs/remotes/origin/{branch}");
+            let tip = match repo.find_reference(&remote) {
+                Ok(r) => r.peel_to_commit()?,
+                Err(e) if e.code() == ErrorCode::NotFound => {
+                    create_worktree(root, branch, &path, None)?;
+                    return Ok(path);
+                }
+                Err(e) => return Err(e.into()),
+            };
+            repo.branch(branch, &tip, false)?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let mut options = git2::WorktreeAddOptions::new();
+    options.reference(Some(local.get_mut()));
+    repo.worktree(
+        &format!("savehub-{}", uuid::Uuid::new_v4()),
+        &path,
+        Some(&options),
+    )?;
+    Ok(path)
+}
+
+/// Compare the exact branch that push publishes to origin, without network or checkout.
+pub fn has_unpushed_commits(root: &Path, branch: &str) -> AdapterResult<bool> {
+    let repo = Repository::open(root)?;
+    let local = repo
+        .find_branch(branch, BranchType::Local)?
+        .get()
+        .peel_to_commit()?
+        .id();
+    let remote = match repo.find_reference(&format!("refs/remotes/origin/{branch}")) {
+        Ok(reference) => reference.peel_to_commit()?.id(),
+        Err(error) if error.code() == ErrorCode::NotFound => return Ok(true),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(repo.graph_ahead_behind(local, remote)?.0 > 0)
+}
+
+pub fn remote_head(repo: &Path, branch: &str) -> AdapterResult<Option<CommitId>> {
+    let repo = Repository::open(repo)?;
+    match repo.find_reference(&format!("refs/remotes/origin/{branch}")) {
+        Ok(r) => Ok(Some(r.peel_to_commit()?.id().to_string())),
+        Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn metadata_dir(repo: &Path) -> AdapterResult<PathBuf> {
+    Ok(Repository::open(repo)?.path().to_owned())
+}
+
+pub fn backup_worktree(repo: &Path) -> AdapterResult<PathBuf> {
+    let repository = Repository::open(repo)?;
+    let root = repository
+        .workdir()
+        .ok_or_else(|| invalid("No working tree"))?;
+    let backup = repository
+        .path()
+        .join("savehub-backups")
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&backup)?;
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        if fs::read_symlink(&path)?.is_some() {
+            return Err(invalid("Linked saves cannot be backed up"));
+        }
+        let target = backup.join(entry.file_name());
+        if fs::is_directory(&path)? {
+            fs::copy_tree(&path, &target)?;
+        } else {
+            fs::write_atomic(&target, &fs::read(&path)?)?;
+        }
+    }
+    Ok(backup)
+}
+
+pub fn conflict_paths(repo: &Path) -> AdapterResult<Vec<PathBuf>> {
+    let repo = Repository::open(repo)?;
+    let mut paths = Vec::new();
+    for item in repo.index()?.conflicts()? {
+        let item = item?;
+        for entry in [item.our, item.their, item.ancestor].into_iter().flatten() {
+            paths.push(PathBuf::from(
+                std::str::from_utf8(&entry.path).map_err(|_| invalid("Non-UTF-8 conflict"))?,
+            ));
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// Preserve both original blobs, including a deletion marker, before resolving.
+pub fn backup_conflict(repo: &Path, path: &Path) -> AdapterResult<(u64, u64)> {
+    relative(path)?;
+    let repository = Repository::open(repo)?;
+    let expected = path
+        .to_str()
+        .ok_or_else(|| invalid("Non-UTF-8 conflict"))?
+        .replace('\\', "/");
+    let backup = repository
+        .path()
+        .join("savehub-conflict-versions")
+        .join(uuid::Uuid::new_v4().to_string());
+    for conflict in repository.index()?.conflicts()? {
+        let conflict = conflict?;
+        if ![&conflict.our, &conflict.their, &conflict.ancestor]
+            .into_iter()
+            .flatten()
+            .any(|e| e.path == expected.as_bytes())
+        {
+            continue;
+        }
+        fs::create_dir_all(&backup)?;
+        let mut sizes = [0, 0];
+        for (i, (name, entry)) in [("local", conflict.our), ("remote", conflict.their)]
+            .into_iter()
+            .enumerate()
+        {
+            if let Some(entry) = entry {
+                let blob = repository.find_blob(entry.id)?;
+                sizes[i] = blob.size() as u64;
+                fs::write_atomic(&backup.join(name), blob.content())?;
+            } else {
+                fs::write_atomic(&backup.join(format!("{name}.deleted")), b"")?;
+            }
+        }
+        fs::write_atomic(&backup.join("path"), expected.as_bytes())?;
+        return Ok((sizes[0], sizes[1]));
+    }
+    Err(invalid("Conflict not found"))
+}
+
+pub fn read_blob(repo: &Path, revision: &str, path: &str) -> AdapterResult<Vec<u8>> {
+    let repo = Repository::open(repo)?;
+    let tree = repo.revparse_single(revision)?.peel_to_tree()?;
+    let entry = tree.get_path(Path::new(path))?;
+    Ok(repo.find_blob(entry.id())?.content().to_vec())
+}
+
+pub fn merge_head(repo: &Path) -> AdapterResult<CommitId> {
+    let mut repo = Repository::open(repo)?;
+    let mut head = None;
+    repo.mergehead_foreach(|id| {
+        head = Some(id.to_string());
+        false
+    })?;
+    head.ok_or_else(|| invalid("No merge in progress"))
+}
+
+pub fn conflict_sizes(repo: &Path, path: &Path) -> AdapterResult<(u64, u64)> {
+    relative(path)?;
+    let repo = Repository::open(repo)?;
+    let expected = path
+        .to_str()
+        .ok_or_else(|| invalid("Non-UTF-8 conflict"))?
+        .replace('\\', "/");
+    for conflict in repo.index()?.conflicts()? {
+        let conflict = conflict?;
+        if [&conflict.our, &conflict.their, &conflict.ancestor]
+            .into_iter()
+            .flatten()
+            .any(|e| e.path == expected.as_bytes())
+        {
+            let size = |entry: Option<git2::IndexEntry>| -> AdapterResult<u64> {
+                entry
+                    .map(|e| {
+                        repo.find_blob(e.id)
+                            .map(|b| b.size() as u64)
+                            .map_err(AdapterError::from)
+                    })
+                    .unwrap_or(Ok(0))
+            };
+            return Ok((size(conflict.our)?, size(conflict.their)?));
+        }
+    }
+    Err(invalid("Conflict not found"))
+}
+
+/// Create a commit from root-level files without changing HEAD, index or worktree.
+pub fn commit_files(
+    repo: &Path,
+    parent: Option<&str>,
+    files: &[(&str, &[u8])],
+    message: &str,
+) -> AdapterResult<CommitId> {
+    let repository = Repository::open(repo)?;
+    let mut builder = repository.treebuilder(None)?;
+    for (name, data) in files {
+        builder.insert(*name, repository.blob(data)?, 0o100644)?;
+    }
+    let tree = repository.find_tree(builder.write()?)?;
+    let parent = parent
+        .map(|p| repository.revparse_single(p)?.peel_to_commit())
+        .transpose()?;
+    let signature = signature(&repository)?;
+    let id = repository.commit(
+        None,
+        &signature,
+        &signature,
+        message,
+        &tree,
+        &parent.iter().collect::<Vec<_>>(),
+    )?;
+    Ok(id.to_string())
 }
 
 pub fn clone(url: &str, path: &Path, token: &str) -> AdapterResult<()> {
@@ -123,6 +388,23 @@ pub fn list_branches(repo: &Path) -> AdapterResult<Vec<String>> {
     Ok(names)
 }
 
+/// Cached remote branch names, without the remote prefix. Does not access the network.
+pub fn list_remote_branches(repo: &Path, remote: &str) -> AdapterResult<Vec<String>> {
+    let repo = Repository::open(repo)?;
+    let prefix = format!("{remote}/");
+    let mut names = Vec::new();
+    for item in repo.branches(Some(BranchType::Remote))? {
+        let (branch, _) = item?;
+        let name = branch
+            .name()?
+            .ok_or_else(|| invalid("Non-UTF-8 branch name"))?;
+        if let Some(name) = name.strip_prefix(&prefix).filter(|name| *name != "HEAD") {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
 pub fn create_branch(repo: &Path, branch: &str, from: &str) -> AdapterResult<()> {
     let repo = Repository::open(repo)?;
     repo.branch(
@@ -153,6 +435,109 @@ pub fn delete_branch(repo: &Path, branch: &str) -> AdapterResult<()> {
     Ok(())
 }
 
+/// Remove a local profile branch after archiving its history and managed worktree.
+/// Remote refs are never changed. A failure leaves the archive available for recovery.
+pub fn archive_profile_branch(
+    root: &Path,
+    branch: &str,
+    key: &str,
+) -> AdapterResult<Option<PathBuf>> {
+    relative(Path::new(key))?;
+    if Path::new(key).components().count() != 1 {
+        return Err(invalid("Expected one worktree key"));
+    }
+    let repo = Repository::open(root)?;
+    if repo.is_worktree() {
+        return Err(invalid("Expected the main repository"));
+    }
+    let expected = repo.commondir().join("savehub/trees").join(key);
+    let common = repo.commondir().canonicalize()?;
+    let mut local = match repo.find_branch(branch, BranchType::Local) {
+        Ok(local) => local,
+        Err(error) if error.code() == ErrorCode::NotFound => {
+            if fs::exists(&expected)? {
+                return Err(invalid("Profile worktree exists without its branch"));
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if local.is_head() {
+        return Err(invalid("Cannot remove the main working tree branch"));
+    }
+    let reference = format!("refs/heads/{branch}");
+    let mut managed = None;
+    for name in repo.worktrees()?.iter() {
+        let name = name?.ok_or_else(|| invalid("Non-UTF-8 worktree name"))?;
+        let worktree = repo.find_worktree(name)?;
+        let tree = Repository::open(worktree.path())?;
+        if tree.head()?.name().ok() != Some(reference.as_str()) {
+            continue;
+        }
+        if managed.is_some()
+            || fs::read_symlink(&expected)?.is_some()
+            || !worktree
+                .path()
+                .canonicalize()?
+                .starts_with(common.join("savehub/trees"))
+            || worktree.path().canonicalize()? != expected.canonicalize()?
+            || tree.commondir().canonicalize()? != repo.commondir().canonicalize()?
+        {
+            return Err(invalid(
+                "Branch is checked out outside its managed profile tree",
+            ));
+        }
+        if tree.state() != RepositoryState::Clean || tree.index()?.has_conflicts() {
+            return Err(invalid(
+                "Resolve the profile Git operation before deleting it",
+            ));
+        }
+        if worktree.is_locked()? != git2::WorktreeLockStatus::Unlocked {
+            return Err(invalid("Profile worktree is locked"));
+        }
+        managed = Some((worktree, tree.path().to_owned()));
+    }
+    if managed.is_none() && fs::exists(&expected)? {
+        return Err(invalid("Profile directory is not its registered worktree"));
+    }
+    let archive_id = uuid::Uuid::new_v4().to_string();
+    let archive = repo
+        .commondir()
+        .join("savehub/deleted-profiles")
+        .join(&archive_id);
+    fs::create_dir_all(&archive)?;
+    if !archive
+        .canonicalize()?
+        .starts_with(common.join("savehub/deleted-profiles"))
+    {
+        return Err(invalid("Archive path escapes repository metadata"));
+    }
+    fs::write_atomic(&archive.join("branch"), branch.as_bytes())?;
+    let tip = local.get().peel_to_commit()?.id();
+    repo.reference(
+        &format!("refs/savehub/deleted-profiles/{archive_id}"),
+        tip,
+        false,
+        "Archive deleted profile",
+    )?;
+    if let Some((worktree, metadata)) = managed {
+        // Keep previous save/conflict backups before removing worktree metadata.
+        fs::copy_tree(&metadata, &archive.join("git-metadata"))?;
+        let original = worktree.path().to_owned();
+        let archived_tree = archive.join("worktree");
+        // Move files into the archive; never recursively delete user saves.
+        fs::rename(&original, &archived_tree)?;
+        let mut options = git2::WorktreePruneOptions::new();
+        options.valid(false).locked(false).working_tree(false);
+        if let Err(error) = worktree.prune(Some(&mut options)) {
+            fs::rename(&archived_tree, &original)?;
+            return Err(error.into());
+        }
+    }
+    // Unmerged independent histories may be removed because an archive ref pins the tip.
+    local.delete()?;
+    Ok(Some(archive))
+}
 fn clean(repo: &Repository) -> AdapterResult<()> {
     if repo.state() != RepositoryState::Clean || !statuses(repo)?.is_empty() {
         return Err(invalid("Working tree must be clean"));
@@ -645,6 +1030,51 @@ mod tests {
         create_branch(repo, "base", &id).unwrap();
         checkout(repo, "base").unwrap();
         id
+    }
+
+    #[test]
+    fn commit_files_preserves_working_state_and_uses_explicit_parent() {
+        let sandbox = Sandbox::new();
+        let path = sandbox.repo("repo");
+        let original = initial(&path);
+        std::fs::write(path.join("save.dat"), b"staged save").unwrap();
+        stage(&path, &["save.dat".into()]).unwrap();
+        std::fs::write(path.join("save.dat"), b"working save").unwrap();
+        let repo = Repository::open(&path).unwrap();
+        let index_before = std::fs::read(repo.path().join("index")).unwrap();
+
+        let first =
+            commit_files(&path, None, &[("marker.json", b"first")], "Create marker").unwrap();
+        let second = commit_files(
+            &path,
+            Some(&first),
+            &[("marker.json", b"second")],
+            "Update marker",
+        )
+        .unwrap();
+
+        let first_commit = repo
+            .find_commit(git2::Oid::from_str(&first).unwrap())
+            .unwrap();
+        assert_eq!(first_commit.parent_count(), 0);
+        let second_commit = repo
+            .find_commit(git2::Oid::from_str(&second).unwrap())
+            .unwrap();
+        assert_eq!(second_commit.parent_count(), 1);
+        assert_eq!(second_commit.parent_id(0).unwrap(), first_commit.id());
+        assert_eq!(second_commit.message().unwrap(), "Update marker");
+        assert_eq!(second_commit.tree().unwrap().len(), 1);
+        assert_eq!(read_blob(&path, &second, "marker.json").unwrap(), b"second");
+        assert_eq!(head(&path).unwrap(), original);
+        assert_eq!(
+            std::fs::read(repo.path().join("index")).unwrap(),
+            index_before
+        );
+        assert_eq!(
+            std::fs::read(path.join("save.dat")).unwrap(),
+            b"working save"
+        );
+        assert!(!path.join("marker.json").exists());
     }
 
     #[test]

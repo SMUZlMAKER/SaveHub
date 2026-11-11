@@ -116,7 +116,8 @@ export const api = {
   currentProfile: () => call<Profile>("current_profile"),
   switchProfile: (profileId: string) =>
     call<void>("switch_profile", { profileId }),
-  createProfile: (name: string) => call<Profile>("create_profile", { name }),
+  createProfile: (name: string): Promise<Profile> =>
+    call<Profile>("create_profile", { name }),
   deleteProfile: (profileId: string) =>
     call<void>("delete_profile", { profileId }),
 

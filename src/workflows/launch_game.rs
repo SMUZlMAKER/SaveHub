@@ -112,11 +112,12 @@ mod tests {
             runtime.clone(),
             settings.clone(),
         ));
-        let profiles = Arc::new(ProfileService::new(
-            catalog,
+        let repo = Arc::new(crate::services::repo::RepoService::new(
+            catalog.clone(),
             runtime.clone(),
             settings.clone(),
         ));
+        let profiles = Arc::new(ProfileService::new(catalog, runtime.clone(), repo));
         (
             LaunchGame::new(processes, profiles, settings.clone()),
             settings,
