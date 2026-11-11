@@ -140,6 +140,7 @@ export interface UpdateStatus {
     | "available"
     | "upToDate"
     | "installing"
+    | "restartRequired"
     | "error";
   version: string | null;
   notes: string | null;

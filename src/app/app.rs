@@ -6,6 +6,9 @@ use std::{
     },
 };
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 
 use crate::adapters::config;
 use crate::api;
@@ -221,21 +224,63 @@ pub fn start() {
 
             api.prevent_exit();
             let repo_worker = worker.lock().expect("RepoWorker state poisoned").take();
-            let Some(repo_worker) = repo_worker else {
+            let Some(mut repo_worker) = repo_worker else {
                 // None also means another exit request is already joining the worker.
                 return;
             };
             let app = app.clone();
             let shutdown_complete = shutdown_complete.clone();
+            let worker = worker.clone();
 
             tauri::async_runtime::spawn_blocking(move || {
-                if let Err(error) = repo_worker.shutdown() {
-                    eprintln!("Не удалось завершить синхронизацию: {error:?}");
+                loop {
+                    match repo_worker.shutdown() {
+                        Ok(()) => break,
+                        Err(error) => {
+                            eprintln!("Не удалось завершить синхронизацию: {error:?}");
+                            match shutdown_decision(&app) {
+                                ShutdownDecision::Retry => continue,
+                                ShutdownDecision::Exit => break,
+                                ShutdownDecision::Stay => {
+                                    *worker.lock().expect("RepoWorker state poisoned") =
+                                        Some(repo_worker);
+                                    return;
+                                }
+                            }
+                        }
+                    }
                 }
 
+                drop(repo_worker);
                 shutdown_complete.store(true, Ordering::Release);
-                app.exit(code.unwrap_or(0));
+                if code == Some(tauri::RESTART_EXIT_CODE) {
+                    app.request_restart();
+                } else {
+                    app.exit(code.unwrap_or(0));
+                }
             });
         }
     });
+}
+
+enum ShutdownDecision {
+    Retry,
+    Exit,
+    Stay,
+}
+
+fn shutdown_decision(app: &tauri::AppHandle) -> ShutdownDecision {
+    const RETRY: &str = "Повторить";
+    const EXIT: &str = "Выйти без синхронизации";
+    let result = app.dialog()
+        .message("Не удалось завершить синхронизацию сохранений. Можно повторить попытку или остаться в приложении. При выходе сейчас последние изменения могут остаться без контрольной точки и отправки на другой ПК.")
+        .title("Синхронизация не завершена")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::YesNoCancelCustom(RETRY.into(), EXIT.into(), "Остаться".into()))
+        .blocking_show_with_result();
+    match result {
+        MessageDialogResult::Custom(label) if label == RETRY => ShutdownDecision::Retry,
+        MessageDialogResult::Custom(label) if label == EXIT => ShutdownDecision::Exit,
+        _ => ShutdownDecision::Stay,
+    }
 }

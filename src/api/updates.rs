@@ -23,6 +23,7 @@ impl Default for Preferences {
 pub struct UpdateStatus {
     pub current_version: String,
     pub configured: bool,
+    /// Includes restartRequired after installation until a successful restart.
     pub phase: String,
     pub version: Option<String>,
     pub notes: Option<String>,
