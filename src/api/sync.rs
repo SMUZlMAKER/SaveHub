@@ -51,10 +51,8 @@ pub fn get_sync_status(
 }
 
 #[tauri::command]
-pub fn sync_now(
-    worker: tauri::State<'_, crate::background::repo::RepoWorkerHandle>,
-) -> ApiResult<()> {
-    worker.sync_now().map_err(Into::into)
+pub fn sync_now(app: tauri::AppHandle) -> ApiResult<()> {
+    crate::app::actions::sync_now(&app)
 }
 
 #[derive(Debug, Serialize)]

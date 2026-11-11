@@ -5,3 +5,5 @@ pub mod updates;
 
 pub mod launch;
 pub mod catalog;
+
+pub mod actions;

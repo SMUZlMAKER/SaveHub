@@ -137,6 +137,7 @@ pub fn spawn(app: tauri::AppHandle) {
                     failed = true;
                 }
             }
+            crate::app::tray::refresh_sync_status(&app);
             std::thread::sleep(Duration::from_secs(2));
         }
     });
