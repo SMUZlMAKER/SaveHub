@@ -33,7 +33,7 @@ export interface Save {
 
 export interface SaveChoice {
   saveId: string;
-  createSnapshot?: boolean;
+  createSave?: boolean;
 }
 
 export interface SaveConflict {
@@ -49,18 +49,18 @@ export type SaveConflictResolution =
   | "keepBothLocalFirst"
   | "keepBothRemoteFirst";
 
-export type SnapshotKind =
+export type SaveKind =
   | "beforeSwitch"
   | "afterSession"
   | "conflict"
   | "beforeRestore";
 
-export interface Snapshot {
+export interface SaveHistoryEntry {
   id: string;
   gameId: string;
   gameName: string;
   profileName: string;
-  kind: SnapshotKind;
+  kind: SaveKind;
   /** Unix-время, мс */
   createdAt: number;
   sizeBytes: number;
@@ -111,7 +111,7 @@ export type ApiErrorKind = "notImplemented" | "rejected" | "internal";
 export type ScreenId =
   | "games"
   | "profiles"
-  | "snapshots"
+  | "saves"
   | "settings"
   | "conflicts";
 

@@ -67,7 +67,7 @@ pub struct SaveVersionDto {
 pub enum ConflictResolution {
     KeepLocal,
     KeepRemote,
-    /// Оставить выбранную пользователем локальную версию, вторую сохранить снапшотом `Conflict`.
+    /// Оставить выбранную пользователем локальную версию, вторую сохранить отдельным сохранением `Conflict`.
     KeepBothLocalFirst,
     /// То же, но основной становится версия из репозитория.
     KeepBothRemoteFirst,
@@ -93,7 +93,7 @@ pub fn list_conflicts() -> ApiResult<Vec<ConflictDto>> {
     }])
 }
 
-/// TODO(backend): сценарий разрешения конфликта; после — `CONFLICTS_CHANGED` и `SNAPSHOTS_CHANGED`.
+/// TODO(backend): сценарий разрешения конфликта; после — `CONFLICTS_CHANGED` и `SAVES_CHANGED`.
 #[tauri::command]
 pub async fn resolve_conflict(
     conflict_id: String,

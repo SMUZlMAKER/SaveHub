@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
 pub type ProfileId = uuid::Uuid;
-pub type SnapshotId = String;
+pub type SaveId = String;
 pub type ConflictId = String;
 pub type CommitId = String;
 
@@ -36,7 +36,7 @@ pub struct LocalConfig {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum SnapshotKind {
+pub enum SaveKind {
     BeforeSwitch,
     AfterSession,
     Conflict,
@@ -45,11 +45,11 @@ pub enum SnapshotKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Snapshot {
-    pub id: SnapshotId,
+pub struct Save {
+    pub id: SaveId,
     pub game_id: GameId,
     pub profile_id: ProfileId,
-    pub kind: SnapshotKind,
+    pub kind: SaveKind,
     /// Unix-время в миллисекундах.
     pub created_at: u64,
     pub size_bytes: u64,

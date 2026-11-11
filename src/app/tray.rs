@@ -1,7 +1,7 @@
 //! Иконка и меню в трее.
 //!
 //! Состав меню взят из макета интерфейса: активный профиль и переключение профилей,
-//! синхронизация, переход к снапшотам и настройкам, статус синхронизации, выход.
+//! синхронизация, переход к сохранениям и настройкам, статус синхронизации, выход.
 //! Меню нативное (Win32), поэтому оно не стилизуется: только текст, галочки и разделители.
 
 use std::sync::Mutex;
@@ -18,7 +18,7 @@ pub const MAIN_WINDOW: &str = "main";
 
 const TRAY_ID: &str = "main";
 const ID_SYNC: &str = "sync";
-const ID_SNAPSHOTS: &str = "snapshots";
+const ID_SAVES: &str = "saves";
 const ID_SETTINGS: &str = "settings";
 const ID_QUIT: &str = "quit";
 const PROFILE_PREFIX: &str = "profile:";
@@ -131,8 +131,8 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     )?)?;
     menu.append(&MenuItem::with_id(
         app,
-        ID_SNAPSHOTS,
-        "Снапшоты и откат…",
+        ID_SAVES,
+        "Сохранения и откат…",
         true,
         None::<&str>,
     )?)?;
@@ -186,7 +186,7 @@ fn refresh(app: &AppHandle) {
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     match event.id.as_ref() {
         ID_SYNC => sync_now(app),
-        ID_SNAPSHOTS => open_screen(app, "snapshots"),
+        ID_SAVES => open_screen(app, "saves"),
         ID_SETTINGS => open_screen(app, "settings"),
         ID_QUIT => app.exit(0),
         id => {

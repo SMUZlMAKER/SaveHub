@@ -27,7 +27,7 @@
     switchingTo = profile.id
     try {
       await api.switchProfile(profile.id)
-      notice.show(`Сохранения переключены на профиль «${profile.name}». Снапшот прежнего состояния создан.`)
+      notice.show(`Сохранения переключены на профиль «${profile.name}». Создано сохранение прежнего состояния.`)
       await load()
     } catch (e) {
       notice.error(e)

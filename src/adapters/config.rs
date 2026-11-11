@@ -74,13 +74,13 @@ pub fn write_local_config(path: &Path, config: &LocalConfig) -> AdapterResult<()
     write_json(path, config)
 }
 
-pub fn read_snapshots(path: &Path) -> AdapterResult<Option<Vec<Snapshot>>> {
+pub fn read_saves(path: &Path) -> AdapterResult<Option<Vec<Save>>> {
     read_json(path)
 }
 
-/// Атомарно записать индекс снимков.
-pub fn write_snapshots(path: &Path, snapshots: &[Snapshot]) -> AdapterResult<()> {
-    write_json(path, snapshots)
+/// Атомарно записать индекс сохранений.
+pub fn write_saves(path: &Path, saves: &[Save]) -> AdapterResult<()> {
+    write_json(path, saves)
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> AdapterResult<Option<T>> {

@@ -25,30 +25,30 @@ impl SaveService {
         todo!()
     }
 
-    pub fn create_snapshot(
+    pub fn create_save(
         &self,
         game_id: GameId,
         profile_id: &str,
-        kind: SnapshotKind,
-    ) -> ServiceResult<Snapshot> {
+        kind: SaveKind,
+    ) -> ServiceResult<Save> {
         todo!()
     }
 
-    /// Снимки от новых к старым.
+    /// Сохранения от новых к старым.
     pub fn list(
         &self,
         game_id: Option<GameId>,
         profile_id: Option<&str>,
-    ) -> ServiceResult<Vec<Snapshot>> {
+    ) -> ServiceResult<Vec<Save>> {
         todo!()
     }
 
-    pub fn get_snapshot(&self, snapshot_id: &str) -> ServiceResult<Snapshot> {
+    pub fn get_save(&self, save_id: &str) -> ServiceResult<Save> {
         todo!()
     }
 
-    /// Применить снимок; требуется бэкап текущих сохранений и остановленная игра.
-    pub fn apply_snapshot(&self, snapshot_id: &str) -> ServiceResult<()> {
+    /// Применить сохранение; требуется бэкап текущих сохранений и остановленная игра.
+    pub fn apply_save(&self, save_id: &str) -> ServiceResult<()> {
         todo!()
     }
 }
