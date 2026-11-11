@@ -23,7 +23,7 @@ pub fn start() {
             api::games::list_games,
             api::games::get_game_status,
             api::games::add_game,
-            api::games::set_game_save_path,
+            api::games::update_game,
             api::profiles::list_profiles,
             api::profiles::current_profile,
             api::profiles::switch_profile,
@@ -82,9 +82,9 @@ pub fn start() {
             let settings = Arc::new(Settings::new(settings_data, local_config));
             let mut profiles = HashMap::new();
             profiles.insert(
-                "main".into(),
+                uuid::Uuid::nil(),
                 crate::domain::Profile {
-                    id: "main".into(),
+                    id: uuid::Uuid::nil(),
                     name: "Основной".into(),
                     branch: "main".into(),
                     last_played_game: None,
@@ -92,7 +92,7 @@ pub fn start() {
             );
             let catalog = Arc::new(Catalog::new(HashMap::new(), profiles));
             let runtime = Arc::new(RuntimeState::new(
-                Some("main".into()),
+                Some(uuid::Uuid::nil()),
                 Vec::new(),
                 SyncStatus {
                     state: SyncState::NotConfigured,

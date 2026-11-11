@@ -6,7 +6,7 @@ use tauri::{Emitter, State};
 
 use super::{ApiError, ApiResult};
 use crate::api::events::PROFILE_CHANGED;
-use crate::domain::Profile;
+use crate::domain::{Profile, ProfileId};
 use crate::services::profile::ProfileService;
 
 #[derive(Debug, Serialize)]
@@ -36,20 +36,20 @@ pub fn list_profiles(service: State<'_, Arc<ProfileService>>) -> ApiResult<Vec<P
     Ok(service
         .list()?
         .into_iter()
-        .map(|profile| to_dto(&profile, active_id.as_deref() == Some(profile.id.as_str())))
+        .map(|profile| to_dto(&profile, active_id.as_ref() == Some(&profile.id)))
         .collect())
 }
 
 /// Переключить сохранения всех игр на профиль. Операция долгая, поэтому `async` — не блокирует окно.
-/// TODO(backend): workflows::SwitchProfile. Если запущена игра — `ApiError::Rejected`.
 /// После успеха — событие `events::PROFILE_CHANGED` и обновить меню трея.
+// TODO(работа с git): workflows::SwitchProfile. Если запущена игра — `ApiError::Rejected`.
 #[tauri::command]
-pub async fn switch_profile(profile_id: String) -> ApiResult<()> {
+pub async fn switch_profile(profile_id: ProfileId) -> ApiResult<()> {
     let _ = profile_id;
     Err(ApiError::NotImplemented("switch_profile"))
 }
 
-/// TODO(backend): ProfileService::create.
+
 #[tauri::command]
 pub fn create_profile(
     app: tauri::AppHandle,
@@ -62,11 +62,10 @@ pub fn create_profile(
     Ok(to_dto(&profile, false))
 }
 
-/// TODO(backend): ProfileService::delete. Активный профиль удалять нельзя — `ApiError::Rejected`.
 #[tauri::command]
 pub fn delete_profile(
     app: tauri::AppHandle,
-    profile_id: String,
+    profile_id: ProfileId,
     service: State<'_, Arc<ProfileService>>,
 ) -> ApiResult<()> {
     service.delete(&profile_id)?;
@@ -77,7 +76,7 @@ pub fn delete_profile(
 
 fn to_dto(profile: &Profile, is_active: bool) -> ProfileDto {
     ProfileDto {
-        id: profile.id.clone(),
+        id: profile.id.to_string(),
         name: profile.name.clone(),
         is_active,
         games_count: 0,

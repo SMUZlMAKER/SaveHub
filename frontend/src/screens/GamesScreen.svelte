@@ -36,7 +36,7 @@
 
   async function savePath(game: Game) {
     try {
-      await api.setGameSavePath(game.id, pathDraft.trim())
+      await api.updateGame(game.id, game.name, pathDraft.trim())
       editingPathFor = null
       await load()
     } catch (e) {
@@ -108,4 +108,4 @@
   </form>
 </Loadable>
 
-<DevNote file="src/api/games.rs" commands={['list_games', 'add_game', 'set_game_save_path']} />
+<DevNote file="src/api/games.rs" commands={['list_games', 'add_game', 'update_game']} />

@@ -1,4 +1,4 @@
-pub fn slugify(value: &str) -> String {
+fn slugify(value: &str) -> String {
     let mut slug = String::new();
     for character in value.chars() {
         if character.is_ascii_alphanumeric() {
