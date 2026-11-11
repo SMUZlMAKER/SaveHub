@@ -67,11 +67,12 @@ mod tests {
     use crate::domain::*;
     use std::collections::HashMap;
 
-    fn fixture() -> (LaunchGame, Arc<Settings>, Arc<RuntimeState>, ProfileId) {
+    fn fixture(include_other: bool) -> (LaunchGame, Arc<Settings>, Arc<RuntimeState>, ProfileId) {
         let active = uuid::Uuid::new_v4();
         let other = uuid::Uuid::new_v4();
         let profiles = [active, other]
             .into_iter()
+            .filter(|id| include_other || *id == active)
             .map(|id| {
                 (
                     id,
@@ -127,17 +128,21 @@ mod tests {
     }
     #[test]
     fn picker_respects_setting_and_profile_count() {
-        let (workflow, settings, _, other) = fixture();
+        let (workflow, settings, _, _) = fixture(true);
         assert!(workflow.prepare().unwrap().needs_profile);
         settings.set_ask_profile_before_launch(false);
         assert!(!workflow.prepare().unwrap().needs_profile);
         settings.set_ask_profile_before_launch(true);
-        workflow.profiles.delete(&other).unwrap();
-        assert!(!workflow.prepare().unwrap().needs_profile);
+        assert!(workflow.prepare().unwrap().needs_profile);
+        // The picker consumes the catalog; Git-backed profile deletion is tested separately.
+        let (single_profile, _, _, _) = fixture(false);
+        let plan = single_profile.prepare().unwrap();
+        assert_eq!(plan.profiles.len(), 1);
+        assert!(!plan.needs_profile);
     }
     #[test]
     fn unavailable_profile_switch_cannot_spawn_or_change_active_profile() {
-        let (workflow, _, runtime, other) = fixture();
+        let (workflow, _, runtime, other) = fixture(true);
         let active = runtime.active_profile();
         assert!(matches!(
             workflow.execute(uuid::Uuid::new_v4(), other),
