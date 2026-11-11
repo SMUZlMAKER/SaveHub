@@ -36,7 +36,16 @@ pub fn switch_profile(app: &tauri::AppHandle, profile_id: ProfileId) -> ApiResul
     ] {
         let _ = app.emit(event, ());
     }
-    result.map_err(Into::into)
+    result.map_err(|error| match error {
+        crate::services::ServiceError::GameRunning(_) => {
+            ApiError::Rejected("Идёт игра. Закройте все игры перед переключением профиля.".into())
+        }
+        crate::services::ServiceError::ProcessesUnknown => ApiError::Rejected(
+            "Не удалось проверить запущенные игры. Переключение профиля временно недоступно."
+                .into(),
+        ),
+        other => other.into(),
+    })
 }
 
 pub fn sync_now(app: &tauri::AppHandle) -> ApiResult<()> {
