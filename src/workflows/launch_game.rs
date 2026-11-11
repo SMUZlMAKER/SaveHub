@@ -9,6 +9,9 @@ pub struct LaunchGame {
     processes: Arc<ProcessService>,
     profiles: Arc<ProfileService>,
     settings: Arc<Settings>,
+    saves: Option<Arc<crate::services::save::SaveService>>,
+    switch: Option<Arc<crate::workflows::SwitchProfile>>,
+    operations: Arc<std::sync::Mutex<()>>,
 }
 
 pub struct LaunchPlan {
@@ -27,7 +30,22 @@ impl LaunchGame {
             processes,
             profiles,
             settings,
+            saves: None,
+            switch: None,
+            operations: Arc::new(std::sync::Mutex::new(())),
         }
+    }
+
+    pub fn with_saves(
+        mut self,
+        saves: Arc<crate::services::save::SaveService>,
+        switch: Arc<crate::workflows::SwitchProfile>,
+        operations: Arc<std::sync::Mutex<()>>,
+    ) -> Self {
+        self.saves = Some(saves);
+        self.switch = Some(switch);
+        self.operations = operations;
+        self
     }
 
     pub fn prepare(&self) -> ServiceResult<LaunchPlan> {
@@ -49,14 +67,40 @@ impl LaunchGame {
     }
 
     pub fn execute(&self, game_id: GameId, profile_id: ProfileId) -> ServiceResult<u32> {
+        self.execute_guarded(game_id, profile_id, || true)
+    }
+
+    pub fn execute_guarded(
+        &self,
+        game_id: GameId,
+        profile_id: ProfileId,
+        proceed: impl FnOnce() -> bool,
+    ) -> ServiceResult<u32> {
         self.profiles.get(&profile_id)?;
         if self.profiles.active()?.map(|p| p.id) != Some(profile_id) {
-            // Integration point: invoke SwitchProfile here once fetch/snapshot/bind are implemented.
-            // Never mark a different profile active without actually switching its saves.
-            return Err(ServiceError::Conflict("Переключение сохранений между профилями ещё не реализовано. Выберите текущий профиль".into()));
+            let switch = self.switch.as_ref().ok_or_else(|| {
+                ServiceError::Conflict("Переключение сохранений не настроено".into())
+            })?;
+            switch.execute(&profile_id)?;
         }
-        // Integration point: compare local/remote snapshot revisions, resolve conflicts,
-        // then acquire a repository session lease. No save-file IO before those exist.
+        let _guard = self
+            .operations
+            .lock()
+            .map_err(|_| ServiceError::Conflict("Блокировка операций повреждена".into()))?;
+        if self.profiles.active()?.map(|p| p.id) != Some(profile_id) {
+            return Err(ServiceError::Conflict(
+                "Активный профиль изменился; повторите запуск".into(),
+            ));
+        }
+        self.processes.refresh_running_games()?;
+        if self.settings.data().local_repo_path.is_some() {
+            if let Some(saves) = &self.saves {
+                saves.bind(game_id, &profile_id.to_string())?;
+            }
+        }
+        if !proceed() {
+            return Err(ServiceError::Conflict("Запуск отменён".into()));
+        }
         self.processes.launch(game_id)
     }
 }

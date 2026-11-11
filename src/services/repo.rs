@@ -386,7 +386,14 @@ impl RepoService {
         Ok(profile)
     }
     fn tree(&self, profile: &Profile) -> ServiceResult<PathBuf> {
-        let (root, _) = self.repository()?;
+        let root = self
+            .settings
+            .data()
+            .local_repo_path
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| {
+                ServiceError::InvalidInput("Укажите абсолютный путь репозитория".into())
+            })?;
         git::prepare_worktree(&root, &profile.branch, &profile.id.to_string())
             .map_err(ServiceError::Adapter)
     }
@@ -449,6 +456,15 @@ impl RepoService {
             ));
         }
         let paths = git::status(path).map_err(ServiceError::Adapter)?;
+        if paths.iter().any(|path| {
+            path.components().any(|part| {
+                part.as_os_str()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(".savehub-"))
+            })
+        }) {
+            return Err(ServiceError::Conflict("В рабочей папке остались временные данные незавершённой операции .savehub-*. Проверьте и сохраните их перед синхронизацией".into()));
+        }
         if paths.is_empty() {
             return Ok(None);
         }
@@ -537,6 +553,9 @@ impl RepoService {
     }
     pub fn list_conflicts(&self) -> ServiceResult<Vec<Conflict>> {
         let _guard = self.lock()?;
+        if self.settings.data().local_repo_path.is_none() {
+            return Ok(Vec::new());
+        }
         let mut conflicts = Vec::new();
         for profile in self.catalog.profiles().into_values() {
             let path = self.tree(&profile)?;
@@ -898,6 +917,28 @@ mod tests {
         assert_eq!(
             fs::read(&fixture.tree().join(fixture.save_path())).unwrap(),
             b"local change"
+        );
+    }
+
+    #[test]
+    fn incomplete_save_staging_is_never_checkpointed() {
+        let fixture = Fixture::new();
+        fixture.service.runtime.set_running_games(Vec::new());
+        let tree = fixture.tree();
+        fs::write_atomic(
+            &tree.join("games/.savehub-import-test/partial"),
+            b"incomplete",
+        )
+        .unwrap();
+        assert!(matches!(
+            fixture
+                .service
+                .checkpoint(&fixture.profile.id.to_string(), "save"),
+            Err(ServiceError::Conflict(_))
+        ));
+        assert_eq!(
+            fs::read(&tree.join("games/.savehub-import-test/partial")).unwrap(),
+            b"incomplete"
         );
     }
 

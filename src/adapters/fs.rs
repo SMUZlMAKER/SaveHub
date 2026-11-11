@@ -45,6 +45,78 @@ fn require_missing(path: &Path) -> AdapterResult<()> {
     Ok(())
 }
 
+/// Compare complete ordinary trees; nested links are rejected by the same preflight as copying.
+pub fn trees_equal(left: &Path, right: &Path) -> AdapterResult<bool> {
+    let left = canonicalize(left)?;
+    let right = canonicalize(right)?;
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    collect_tree(&left, &mut a)?;
+    collect_tree(&right, &mut b)?;
+    let mut a: Vec<_> = a
+        .into_iter()
+        .map(|(p, m)| (p.strip_prefix(&left).unwrap().to_owned(), m.is_dir()))
+        .collect();
+    let mut b: Vec<_> = b
+        .into_iter()
+        .map(|(p, m)| (p.strip_prefix(&right).unwrap().to_owned(), m.is_dir()))
+        .collect();
+    a.sort();
+    b.sort();
+    if a != b {
+        return Ok(false);
+    }
+    for (path, directory) in a {
+        if !directory && read(&left.join(&path))? != read(&right.join(&path))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Resolve an existing path, including a managed root link.
+pub fn canonicalize(path: &Path) -> AdapterResult<PathBuf> {
+    fs::canonicalize(path).map_err(|error| io_error(path, error))
+}
+
+/// Reject links in application-owned path components (including dangling links).
+pub fn require_plain_path(root: &Path, path: &Path) -> AdapterResult<()> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| invalid("Path outside storage"))?;
+    let mut current = root.to_owned();
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(invalid("Unsafe storage path"));
+        }
+        current.push(component);
+        if metadata(&current)?.is_some_and(|m| is_link(&m)) {
+            return Err(invalid("Link inside managed storage"));
+        }
+    }
+    Ok(())
+}
+
+/// Publish a prepared directory, retaining the old path on disk. Roll back on failure.
+/// The staged directory must be a sibling so both renames stay on one filesystem.
+pub fn replace_directory(destination: &Path, staged: &Path) -> AdapterResult<PathBuf> {
+    if staged.parent() != destination.parent() {
+        return Err(invalid("Staging must be beside destination"));
+    }
+    let backup = destination.with_file_name(format!(".savehub-backup-{}", uuid::Uuid::new_v4()));
+    rename(destination, &backup)?;
+    if let Err(error) = rename(staged, destination) {
+        if let Err(rollback) = rename(&backup, destination) {
+            return Err(AdapterError::InvalidData(format!(
+                "Replacement failed: {error:?}; rollback failed: {rollback:?}; backup: {}",
+                backup.display()
+            )));
+        }
+        return Err(error);
+    }
+    Ok(backup)
+}
+
 /// Раскрыть Windows-переменные окружения на текущем ПК.
 pub fn expand_path(path: &str) -> AdapterResult<PathBuf> {
     let variables: Vec<_> = std::env::vars_os().collect();

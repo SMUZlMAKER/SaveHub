@@ -7,6 +7,7 @@ pub struct ProfileService {
     runtime: Arc<RuntimeState>,
     repo: Arc<RepoService>,
     operations: Arc<Mutex<()>>,
+    persistence: Option<std::path::PathBuf>,
 }
 
 impl ProfileService {
@@ -25,7 +26,24 @@ impl ProfileService {
             runtime,
             repo,
             operations,
+            persistence: None,
         }
+    }
+
+    pub fn persistent(mut self, directory: std::path::PathBuf) -> Self {
+        self.persistence = Some(directory);
+        self
+    }
+
+    fn persist(&self) -> ServiceResult<()> {
+        if let Some(directory) = &self.persistence {
+            crate::adapters::config::write_profiles(
+                &directory.join("profiles.json"),
+                &self.list()?,
+            )
+            .map_err(ServiceError::Adapter)?;
+        }
+        Ok(())
     }
 
     pub fn list(&self) -> ServiceResult<Vec<Profile>> {
@@ -66,12 +84,21 @@ impl ProfileService {
             last_played_game: None,
         };
         self.catalog.add_profile(profile.clone());
+        if let Err(error) = self.persist() {
+            self.catalog.remove_profile(&profile.id);
+            return Err(error);
+        }
         Ok(profile)
     }
 
     /// Переименовать без изменения идентификатора.
     pub fn rename(&self, profile_id: &ProfileId, name: &str) -> ServiceResult<()> {
+        let _guard = self
+            .operations
+            .lock()
+            .map_err(|_| ServiceError::Conflict("Блокировка профиля повреждена".into()))?;
         let mut profile = self.get(profile_id)?;
+        let previous = profile.clone();
         if name.trim().is_empty() {
             return Err(ServiceError::InvalidInput(
                 "Имя профиля не может быть пустым".into(),
@@ -80,6 +107,10 @@ impl ProfileService {
         profile.name = name.trim().to_owned();
         if !self.catalog.update_profile(profile) {
             return Err(ServiceError::NotFound("Профиль не найден".into()));
+        }
+        if let Err(error) = self.persist() {
+            self.catalog.update_profile(previous);
+            return Err(error);
         }
         Ok(())
     }
@@ -96,12 +127,24 @@ impl ProfileService {
                 "Активный профиль удалить нельзя".into(),
             ));
         }
-        self.repo.delete_profile(profile_id)?;
-        if self.catalog.remove_profile(profile_id) {
-            Ok(())
-        } else {
-            Err(ServiceError::NotFound("Профиль не найден".into()))
+        let profile = self.get(profile_id)?;
+        self.catalog.remove_profile(profile_id);
+        if let Err(error) = self.persist() {
+            self.catalog.add_profile(profile);
+            return Err(error);
         }
+        // RepoService validates the profile through Catalog, so retain it until archival completes.
+        self.catalog.add_profile(profile.clone());
+        if let Err(error) = self.repo.delete_profile(profile_id) {
+            self.persist().map_err(|rollback| {
+                ServiceError::Conflict(format!(
+                    "Удаление: {error:?}; восстановление метаданных: {rollback:?}"
+                ))
+            })?;
+            return Err(error);
+        }
+        self.catalog.remove_profile(profile_id);
+        Ok(())
     }
 
     /// Зафиксировать активный профиль после успешной смены сохранений.
@@ -110,15 +153,31 @@ impl ProfileService {
             .operations
             .lock()
             .map_err(|_| ServiceError::Conflict("Блокировка операций профиля повреждена".into()))?;
+        self.set_active_locked(profile_id)
+    }
+
+    /// Caller already holds the shared operations mutex.
+    pub(crate) fn set_active_locked(&self, profile_id: &ProfileId) -> ServiceResult<()> {
         if !self.catalog.profiles().contains_key(profile_id) {
             return Err(ServiceError::NotFound("Профиль не найден".into()));
         }
+        let previous = self.runtime.active_profile();
         self.runtime
             .set_active_profile(Some(*profile_id))
             .map_err(|error| match error {
                 ProfileActivationError::ProcessesUnknown => ServiceError::ProcessesUnknown,
                 ProfileActivationError::GamesRunning(games) => ServiceError::GameRunning(games),
-            })
+            })?;
+        if let Some(directory) = &self.persistence {
+            if let Err(error) = crate::adapters::config::write_active_profile(
+                &directory.join("active-profile.json"),
+                profile_id,
+            ) {
+                let _ = self.runtime.set_active_profile(previous);
+                return Err(ServiceError::Adapter(error));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -476,5 +535,27 @@ mod tests {
             assert_ne!(first.id, second.id);
         });
         assert_eq!(fixture.service.list().unwrap().len(), 2);
+    }
+    #[test]
+    fn persists_profile_metadata_and_active_id_and_rolls_back_failed_rename() {
+        let mut fixture = Fixture::new();
+        let directory = fixture.root.join("local-state");
+        fixture.service.persistence = Some(directory.clone());
+        fixture.service.runtime.set_running_games(Vec::new());
+        let profile = fixture.service.create("Persistent").unwrap();
+        let stored = crate::adapters::config::read_profiles(&directory.join("profiles.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored[0].id, profile.id);
+        fixture.service.set_active(&profile.id).unwrap();
+        assert_eq!(
+            crate::adapters::config::read_active_profile(&directory.join("active-profile.json"))
+                .unwrap(),
+            Some(profile.id)
+        );
+        std::fs::remove_file(directory.join("profiles.json")).unwrap();
+        std::fs::create_dir(directory.join("profiles.json")).unwrap();
+        assert!(fixture.service.rename(&profile.id, "Renamed").is_err());
+        assert_eq!(fixture.service.get(&profile.id).unwrap().name, "Persistent");
     }
 }
