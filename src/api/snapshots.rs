@@ -2,7 +2,7 @@
 // TODO UI в тг отписал
 use serde::Serialize;
 
-use super::{ApiError, ApiResult, stub};
+use super::{ApiError, ApiResult};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,27 +35,8 @@ pub enum SnapshotKind {
 /// TODO(backend): SaveService/SnapshotService::list.
 #[tauri::command]
 pub fn list_snapshots(game_id: Option<String>) -> ApiResult<Vec<SnapshotDto>> {
-    let snapshot = |id: &str, game: (&str, &str), kind, minutes, size_mb: u64| SnapshotDto {
-        id: id.into(),
-        game_id: game.0.into(),
-        game_name: game.1.into(),
-        profile_name: "Основной".into(),
-        kind,
-        created_at: stub::minutes_ago(minutes),
-        size_bytes: size_mb * 1024 * 1024,
-    };
-    let hk = ("hollow-knight", "Hollow Knight");
-    let sv = ("stardew-valley", "Stardew Valley");
-    let all = vec![
-        snapshot("s4", hk, SnapshotKind::AfterSession, 25, 3),
-        snapshot("s3", sv, SnapshotKind::BeforeSwitch, 95, 12),
-        snapshot("s2", sv, SnapshotKind::AfterSession, 180, 12),
-        snapshot("s1", hk, SnapshotKind::Conflict, 60 * 26, 3),
-    ];
-    Ok(all
-        .into_iter()
-        .filter(|s| game_id.as_deref().is_none_or(|id| s.game_id == id))
-        .collect())
+    let _ = game_id;
+    Err(ApiError::NotImplemented("list_snapshots"))
 }
 
 /// Откатить сохранения игры к снапшоту. Текущее состояние сначала сохраняется снапшотом `BeforeRestore`.

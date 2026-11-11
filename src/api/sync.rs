@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, ApiResult, stub};
+use super::{ApiError, ApiResult};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,11 +27,7 @@ pub enum SyncState {
 /// TODO(backend): состояние RepoWorker.
 #[tauri::command]
 pub fn get_sync_status() -> ApiResult<SyncStatusDto> {
-    Ok(SyncStatusDto {
-        state: SyncState::Idle,
-        last_sync_at: Some(stub::minutes_ago(3)),
-        error: None,
-    })
+    Err(ApiError::NotImplemented("get_sync_status"))
 }
 
 /// TODO(backend): попросить RepoWorker синхронизироваться, не дожидаясь таймера.
@@ -76,21 +72,7 @@ pub enum ConflictResolution {
 /// Нерешенные конфликты. TODO(backend): RepoWorker находит их при синхронизации, хранить в RuntimeState.
 #[tauri::command]
 pub fn list_conflicts() -> ApiResult<Vec<ConflictDto>> {
-    Ok(vec![ConflictDto {
-        id: "c1".into(),
-        game_id: "hollow-knight".into(),
-        game_name: "Hollow Knight".into(),
-        local: SaveVersionDto {
-            machine_name: "Этот ПК".into(),
-            modified_at: stub::minutes_ago(40),
-            size_bytes: 3 * 1024 * 1024,
-        },
-        remote: SaveVersionDto {
-            machine_name: "Ноутбук".into(),
-            modified_at: stub::minutes_ago(190),
-            size_bytes: 2 * 1024 * 1024 + 300 * 1024,
-        },
-    }])
+    Err(ApiError::NotImplemented("list_conflicts"))
 }
 
 /// TODO(backend): сценарий разрешения конфликта; после — `CONFLICTS_CHANGED` и `SNAPSHOTS_CHANGED`.

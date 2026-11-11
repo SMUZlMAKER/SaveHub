@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { api, events, subscribe } from './lib/api'
+  import { api, describeError, events, subscribe } from './lib/api'
   import { formatAgo } from './lib/format'
   import { notice } from './lib/notice.svelte'
-  import type { ScreenId, SyncStatus, UpdateStatus } from './lib/types'
+  import type { AppFeatures, ScreenId, SyncStatus, UpdateStatus } from './lib/types'
   import GamesScreen from './screens/GamesScreen.svelte'
   import ProfilesScreen from './screens/ProfilesScreen.svelte'
   import SnapshotsScreen from './screens/SnapshotsScreen.svelte'
@@ -18,6 +18,18 @@
   ]
   const screenIds: ScreenId[] = ['games', 'profiles', 'snapshots', 'settings', 'conflicts']
 
+  let features = $state<AppFeatures | null>(null)
+  let featureError = $state('')
+  let syncError = $state('')
+
+  async function loadFeatures() {
+    featureError = ''
+    try {
+      features = await api.getAppFeatures()
+      await Promise.all([loadSync(), loadConflicts()])
+    } catch (e) { featureError = describeError(e) }
+  }
+
   let update = $state<UpdateStatus | null>(null)
   let screen = $state<ScreenId>('games')
   let sync = $state<SyncStatus | null>(null)
@@ -27,7 +39,10 @@
   let now = $state(Date.now())
 
   const syncText = $derived.by(() => {
-    if (!sync) return ''
+    if (!features) return 'Проверяем доступные функции…'
+    if (!features.sync) return 'Синхронизация пока недоступна в этой версии'
+    if (syncError) return 'Не удалось получить статус синхронизации'
+    if (!sync) return 'Проверяем состояние синхронизации…'
     switch (sync.state) {
       case 'notConfigured':
         return 'Синхронизация не настроена'
@@ -41,14 +56,18 @@
   })
 
   async function loadSync() {
+    if (!features?.sync) return
     try {
+      syncError = ''
       sync = await api.getSyncStatus()
     } catch (e) {
-      notice.error(e)
+      sync = null
+      syncError = describeError(e)
     }
   }
 
   async function loadConflicts() {
+    if (!features?.conflicts) return
     try {
       conflictCount = (await api.listConflicts()).length
     } catch (e) {
@@ -57,6 +76,7 @@
   }
 
   async function syncNow() {
+    if (!features?.sync || syncing || !sync || sync.state === 'notConfigured' || sync.state === 'syncing') return
     syncing = true
     try {
       await api.syncNow()
@@ -70,8 +90,7 @@
 
   onMount(() => {
     api.getUpdateStatus().then((value) => { update = value }).catch(console.error)
-    loadSync()
-    loadConflicts()
+    loadFeatures()
     const timer = setInterval(() => (now = Date.now()), 30_000)
     const stops = [
       subscribe<UpdateStatus>(events.updateStatusChanged, (value) => { update = value }),
@@ -94,7 +113,7 @@
     <h1>SaveHub</h1>
     <span class="muted sync-state" class:error={sync?.state === 'error'}>{syncText}</span>
   </div>
-  <button onclick={syncNow} disabled={syncing || sync?.state === 'syncing'}>Синхронизировать</button>
+  <button onclick={syncNow} disabled={!features?.sync || !sync || sync.state === 'notConfigured' || syncing || sync.state === 'syncing'}>Синхронизировать</button>
 </header>
 
 <nav>
@@ -116,16 +135,23 @@
 {/if}
 
 <main>
-  {#if screen === 'games'}
-    <GamesScreen />
-  {:else if screen === 'profiles'}
-    <ProfilesScreen />
-  {:else if screen === 'snapshots'}
-    <SnapshotsScreen />
-  {:else if screen === 'settings'}
-    <SettingsScreen />
+  {#if featureError}
+    <div class="card" role="alert"><h2>Не удалось проверить доступные функции</h2><p>{featureError}</p><button onclick={loadFeatures}>Повторить</button></div>
+  {:else if !features}
+    <p role="status">Загружаем SaveHub…</p>
   {:else}
-    <ConflictsScreen />
+  {#if syncError}<p role="alert">{syncError} <button onclick={loadSync}>Повторить проверку</button></p>{/if}
+  {#if screen === 'games'}
+    <GamesScreen {features} onsettings={() => screen = 'settings'} />
+  {:else if screen === 'profiles'}
+    <ProfilesScreen {features} />
+  {:else if screen === 'snapshots'}
+    <SnapshotsScreen {features} />
+  {:else if screen === 'settings'}
+    <SettingsScreen {features} />
+  {:else}
+    <ConflictsScreen {features} />
+  {/if}
   {/if}
 </main>
 

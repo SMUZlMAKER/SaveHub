@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, describeError, events, subscribe } from '../lib/api'
-  import type { Game, GameStatus } from '../lib/types'
+  import type { AppFeatures, Game, GameStatus } from '../lib/types'
+  import FirstRun from '../lib/components/FirstRun.svelte'
+  let { features, onsettings }: { features: AppFeatures; onsettings: () => void } = $props()
+
   import GameForm from '../lib/components/GameForm.svelte'
 
   const statusLabel: Record<GameStatus, { text: string; tone: string }> = {
@@ -29,7 +32,7 @@
     // Do not hide a successful mutation behind a failing refresh or a late list response.
     generation++; loading = false; loadError = ''
     games = [...games.filter(g => g.id !== game.id), game].sort((a, b) => a.name.localeCompare(b.name))
-    editor = null; savedNote = `Настройки «${game.name}» применены для текущего запуска приложения.`
+    editor = null; savedNote = features.persistentGames ? `Настройки «${game.name}» сохранены.` : `Настройки «${game.name}» применены для текущего запуска приложения.`
   }
   function edit(mode: 'add' | 'edit' | 'resolve', game?: Game) {
     savedNote = ''; editor = { mode, game }
@@ -41,7 +44,8 @@
   <div><h2>Игры</h2><p class="muted">Выберите игры и укажите, где находятся их сохранения.</p></div>
   <button class="primary" disabled={editor !== null || loading || !!loadError} onclick={() => edit('add')}>Добавить игру</button>
 </div>
-<p class="setup-note">В этой версии список игр и локальные пути сохраняются только до закрытия приложения. Файлы игр и сохранений не изменяются.</p>
+{#if !editor}<FirstRun {features} gamesCount={games.length} gamesLoading={loading} gamesError={loadError} {onsettings} onadd={() => edit('add')} adding={editor !== null} />{/if}
+{#if !features.persistentGames}<p class="setup-note">В этой версии список игр и локальные пути сохраняются только до закрытия приложения. Файлы игр и сохранений не изменяются.</p>{/if}
 {#if savedNote}<p class="success-note" role="status">{savedNote}</p>{/if}
 {#if editor}
   {#key `${editor.mode}:${editor.game?.id ?? 'new'}`}
@@ -52,11 +56,7 @@
   <p class="muted" role="status">Загружаем игры…</p>
 {:else if loadError}
   <div class="card load-error" role="alert"><p class="error">{loadError}</p><button onclick={load}>Повторить</button></div>
-{:else if !games.length}
-  {#if !editor}
-    <div class="card empty-games"><h3>Добавьте первую игру</h3><p class="muted">Выберите exe — SaveHub попробует подсказать папку сохранений. Путь можно указать вручную.</p><button class="primary" onclick={() => edit('add')}>Выбрать игру</button></div>
-  {/if}
-{:else}
+{:else if games.length}
   <ul class="list">
     {#each games as game (game.id)}
       <li class="row game-row">
@@ -85,8 +85,6 @@
   .games-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
   .setup-note { padding: 10px 12px; border-radius: 6px; background: var(--accent-soft); font-size: 13px; }
   .success-note { color: var(--ok); }
-  .empty-games { padding: 24px; text-align: center; }
-  .empty-games h3 { margin: 0 0 8px; }
   .load-error { padding: 16px; }
   .game-title { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; align-items: center; }
   .game-path { overflow-wrap: anywhere; }

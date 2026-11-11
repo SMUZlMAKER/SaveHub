@@ -21,6 +21,7 @@ pub fn start() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            api::features::get_app_features,
             api::games::list_games,
             api::games::get_game_status,
             api::games::add_game,

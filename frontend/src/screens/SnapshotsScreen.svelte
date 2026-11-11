@@ -1,10 +1,12 @@
 <script lang="ts">
+  import type { AppFeatures } from '../lib/types'
+  let { features }: { features: AppFeatures } = $props()
+
   import { onMount } from 'svelte'
   import { api, describeError, events, subscribe } from '../lib/api'
   import { formatAgo, formatSize } from '../lib/format'
   import { notice } from '../lib/notice.svelte'
   import type { Game, Snapshot, SnapshotKind } from '../lib/types'
-  import DevNote from '../lib/components/DevNote.svelte'
   import Loadable from '../lib/components/Loadable.svelte'
 
   const kindLabel: Record<SnapshotKind, string> = {
@@ -45,6 +47,7 @@
   }
 
   onMount(() => {
+    if (!features.saveHistory) return
     api.listGames().then((list) => (games = list), notice.error.bind(notice))
     load()
     return subscribe(events.snapshotsChanged, load)
@@ -54,6 +57,8 @@
 <h2>Снапшоты и откат</h2>
 <p class="muted">Копии сохранений, которые SaveHub делает перед рискованными действиями.</p>
 
+{#if !features.saveHistory}<p class="availability-note">История сохранений и восстановление пока недоступны в этой версии. Автоматические копии ещё не создаются.</p>{/if}
+{#if features.saveHistory}
 <label class="field">
   <span class="muted">Игра</span>
   <select bind:value={gameId} onchange={load}>
@@ -88,5 +93,4 @@
     {/each}
   </ul>
 </Loadable>
-
-<DevNote file="src/api/snapshots.rs" commands={['list_snapshots', 'restore_snapshot']} />
+{/if}

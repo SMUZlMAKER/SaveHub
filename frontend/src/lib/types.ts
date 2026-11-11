@@ -1,6 +1,16 @@
 // Типы ответов Rust-ручек из src/api/*. Поля — camelCase, как отдает serde.
 // Меняешь DTO в Rust — поправь и здесь.
 
+/** Build capabilities; true does not confirm a repository connection. */
+export interface AppFeatures {
+  sync: boolean;
+  profileSwitch: boolean;
+  saveHistory: boolean;
+  conflicts: boolean;
+  persistentGames: boolean;
+  persistentProfiles: boolean;
+}
+
 export type GameStatus = "found" | "missing" | "running" | "ignored";
 
 export interface Game {
