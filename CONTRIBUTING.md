@@ -116,7 +116,7 @@ npm run tauri -- build --bundles nsis --config target/updater/tauri.updater.conf
 | --- | --- | --- |
 | Игры | `list_games`, `add_game`, `set_game_save_path` | GameService, RuntimeState (запущенные игры) |
 | Профили | `list_profiles`, `switch_profile`, `create_profile`, `delete_profile` | ProfileService, workflows::SwitchProfile |
-| Снапшоты | `list_snapshots`, `restore_snapshot` | SaveService / снапшоты, сценарий отката |
+| Сохранения | `list_save_history`, `restore_save` | SaveService / сохранения, сценарий отката |
 | Настройки | `get_settings`, `update_settings`, `set_github_token` | хранилище Settings, системное хранилище токена |
 | Запуск и обновления | `get_app_preferences`, `save_app_preferences`, `get_update_status`, `check_for_updates`, `install_update` | реализованы; настройки в `updates.json` |
 | Шапка, трей | `get_sync_status`, `sync_now` | RepoWorker |

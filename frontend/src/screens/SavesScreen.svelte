@@ -3,11 +3,11 @@
   import { api, describeError, events, subscribe } from '../lib/api'
   import { formatAgo, formatSize } from '../lib/format'
   import { notice } from '../lib/notice.svelte'
-  import type { Game, Snapshot, SnapshotKind } from '../lib/types'
+  import type { Game, SaveHistoryEntry, SaveKind } from '../lib/types'
   import DevNote from '../lib/components/DevNote.svelte'
   import Loadable from '../lib/components/Loadable.svelte'
 
-  const kindLabel: Record<SnapshotKind, string> = {
+  const kindLabel: Record<SaveKind, string> = {
     beforeSwitch: 'Перед переключением профиля',
     afterSession: 'После игровой сессии',
     conflict: 'Вторая версия при конфликте',
@@ -16,15 +16,15 @@
 
   let games = $state<Game[]>([])
   let gameId = $state<string | null>(null)
-  let snapshots = $state<Snapshot[]>([])
+  let saves = $state<SaveHistoryEntry[]>([])
   let loading = $state(true)
   let loadError = $state<string | null>(null)
-  // Откат необратим без нового снапшота, поэтому спрашиваем второй раз
+  // Откат необратим без нового сохранения, поэтому спрашиваем второй раз
   let confirming = $state<string | null>(null)
 
   async function load() {
     try {
-      snapshots = await api.listSnapshots(gameId)
+      saves = await api.listSaveHistory(gameId)
       loadError = null
     } catch (e) {
       loadError = describeError(e)
@@ -33,11 +33,11 @@
     }
   }
 
-  async function restore(snapshot: Snapshot) {
+  async function restore(save: SaveHistoryEntry) {
     confirming = null
     try {
-      await api.restoreSnapshot(snapshot.id)
-      notice.show(`${snapshot.gameName}: откат выполнен. Текущее состояние сохранено снапшотом.`)
+      await api.restoreSave(save.id)
+      notice.show(`${save.gameName}: откат выполнен. Создана резервная копия предыдущего состояния.`)
       await load()
     } catch (e) {
       notice.error(e)
@@ -47,11 +47,11 @@
   onMount(() => {
     api.listGames().then((list) => (games = list), notice.error.bind(notice))
     load()
-    return subscribe(events.snapshotsChanged, load)
+    return subscribe(events.savesChanged, load)
   })
 </script>
 
-<h2>Снапшоты и откат</h2>
+<h2>Сохранения и откат</h2>
 <p class="muted">Копии сохранений, которые SaveHub делает перед рискованными действиями.</p>
 
 <label class="field">
@@ -66,27 +66,27 @@
 
 <Loadable {loading} error={loadError}>
   <ul class="list">
-    {#each snapshots as snapshot (snapshot.id)}
+    {#each saves as save (save.id)}
       <li class="row">
         <div class="grow">
-          <div>{kindLabel[snapshot.kind]}</div>
+          <div>{kindLabel[save.kind]}</div>
           <div class="muted">
-            {snapshot.gameName} · {snapshot.profileName} · {formatAgo(snapshot.createdAt)} · {formatSize(
-              snapshot.sizeBytes,
+            {save.gameName} · {save.profileName} · {formatAgo(save.createdAt)} · {formatSize(
+              save.sizeBytes,
             )}
           </div>
         </div>
-        {#if confirming === snapshot.id}
+        {#if confirming === save.id}
           <button onclick={() => (confirming = null)}>Отмена</button>
-          <button class="danger" onclick={() => restore(snapshot)}>Точно откатить</button>
+          <button class="danger" onclick={() => restore(save)}>Точно откатить</button>
         {:else}
-          <button onclick={() => (confirming = snapshot.id)}>Откатить</button>
+          <button onclick={() => (confirming = save.id)}>Откатить</button>
         {/if}
       </li>
     {:else}
-      <li class="row muted">Снапшотов пока нет.</li>
+      <li class="row muted">Сохранений пока нет.</li>
     {/each}
   </ul>
 </Loadable>
 
-<DevNote file="src/api/snapshots.rs" commands={['list_snapshots', 'restore_snapshot']} />
+<DevNote file="src/api/saves.rs" commands={['list_save_history', 'restore_save']} />

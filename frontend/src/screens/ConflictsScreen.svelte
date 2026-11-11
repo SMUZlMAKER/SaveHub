@@ -79,7 +79,7 @@
         {@render version(conflict, 'remote', conflict.remote)}
       </div>
       <label class="toggle">
-        <span>Сохранить вторую версию снапшотом</span>
+        <span>Сохранить вторую версию отдельным сохранением</span>
         <input type="checkbox" bind:checked={choices[conflict.id].keepBoth} />
       </label>
       <div class="actions">

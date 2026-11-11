@@ -5,13 +5,13 @@
 pub const GAMES_CHANGED: &str = "games-changed";
 /// Сменился активный профиль (в том числе из трея) или список профилей.
 pub const PROFILE_CHANGED: &str = "profile-changed";
-/// Появились новые снапшоты.
-pub const SNAPSHOTS_CHANGED: &str = "snapshots-changed";
+/// Появились новые сохранения.
+pub const SAVES_CHANGED: &str = "saves-changed";
 /// Изменился статус синхронизации (началась, закончилась, упала).
 pub const SYNC_STATUS_CHANGED: &str = "sync-status-changed";
 /// Появились или разрешились конфликты сохранений.
 pub const CONFLICTS_CHANGED: &str = "conflicts-changed";
-/// Открыть в окне конкретный экран. Payload — id экрана: "games", "profiles", "snapshots", "settings", "conflicts".
+/// Открыть в окне конкретный экран. Payload — id экрана: "games", "profiles", "saves", "settings", "conflicts".
 pub const NAVIGATE: &str = "navigate";
 
 /// Payload — UpdateStatus: состояние проверки или установки обновления.

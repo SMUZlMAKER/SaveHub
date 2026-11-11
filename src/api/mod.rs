@@ -10,7 +10,6 @@ pub mod games;
 pub mod profiles;
 pub mod saves;
 pub mod settings;
-pub mod snapshots;
 pub mod sync;
 
 mod stub;

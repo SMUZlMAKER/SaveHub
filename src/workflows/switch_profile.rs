@@ -50,10 +50,10 @@ impl SwitchProfile {
         }
         self.repo.fetch()?;
         for game in self.games.list()? {
-            self.saves.create_snapshot(
+            self.saves.create_save(
                 game.id,
                 &profile_id.to_string(),// TODO заменить на текущий профиль, вместо нового
-                crate::domain::SnapshotKind::BeforeSwitch,
+                crate::domain::SaveKind::BeforeSwitch,
             )?;
             self.saves.bind(game.id, &profile_id.to_string())?;
         }

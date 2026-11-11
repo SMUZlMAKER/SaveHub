@@ -22,7 +22,7 @@ import type {
   SaveConflict,
   SaveConflictResolution,
   Settings,
-  Snapshot,
+  SaveHistoryEntry,
   SyncStatus,
 } from "./types";
 
@@ -128,11 +128,11 @@ export const api = {
     resolution: SaveConflictResolution,
   ) => call<void>("resolve_save_conflict", { game, conflictId, resolution }),
 
-  // src/api/snapshots.rs
-  listSnapshots: (gameId: string | null) =>
-    call<Snapshot[]>("list_snapshots", { gameId }),
-  restoreSnapshot: (snapshotId: string) =>
-    call<void>("restore_snapshot", { snapshotId }),
+  // src/api/saves.rs
+  listSaveHistory: (gameId: string | null) =>
+    call<SaveHistoryEntry[]>("list_save_history", { gameId }),
+  restoreSave: (saveId: string) =>
+    call<void>("restore_save", { saveId }),
 
   // src/api/sync.rs
   getSyncStatus: () => call<SyncStatus>("get_sync_status"),
@@ -154,7 +154,7 @@ export const events = {
   gameProcessChanged: 'game-process-changed',
   gamesChanged: "games-changed",
   profileChanged: "profile-changed",
-  snapshotsChanged: "snapshots-changed",
+  savesChanged: "saves-changed",
   syncStatusChanged: "sync-status-changed",
   conflictsChanged: "conflicts-changed",
   navigate: "navigate",

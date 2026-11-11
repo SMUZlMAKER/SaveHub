@@ -7,17 +7,17 @@
   import LaunchPanel from './lib/components/LaunchPanel.svelte'
   import GamesScreen from './screens/GamesScreen.svelte'
   import ProfilesScreen from './screens/ProfilesScreen.svelte'
-  import SnapshotsScreen from './screens/SnapshotsScreen.svelte'
+  import SavesScreen from './screens/SavesScreen.svelte'
   import SettingsScreen from './screens/SettingsScreen.svelte'
   import ConflictsScreen from './screens/ConflictsScreen.svelte'
 
   const tabs: { id: ScreenId; title: string }[] = [
     { id: 'games', title: 'Игры' },
     { id: 'profiles', title: 'Профили' },
-    { id: 'snapshots', title: 'Снапшоты' },
+    { id: 'saves', title: 'Сохранения' },
     { id: 'settings', title: 'Настройки' },
   ]
-  const screenIds: ScreenId[] = ['games', 'profiles', 'snapshots', 'settings', 'conflicts']
+  const screenIds: ScreenId[] = ['games', 'profiles', 'saves', 'settings', 'conflicts']
 
   let processError = $state('')
   let update = $state<UpdateStatus | null>(null)
@@ -80,7 +80,7 @@
       subscribe<UpdateStatus>(events.updateStatusChanged, (value) => { update = value }),
       subscribe(events.syncStatusChanged, loadSync),
       subscribe(events.conflictsChanged, loadConflicts),
-      // Пункты трея «Снапшоты и откат…» и «Настройки…» открывают окно на нужном экране
+      // Пункты трея «Сохранения и откат…» и «Настройки…» открывают окно на нужном экране
       subscribe<string>(events.navigate, (target) => {
         if ((screenIds as string[]).includes(target)) screen = target as ScreenId
       }),
@@ -126,8 +126,8 @@
     <GamesScreen />
   {:else if screen === 'profiles'}
     <ProfilesScreen />
-  {:else if screen === 'snapshots'}
-    <SnapshotsScreen />
+  {:else if screen === 'saves'}
+    <SavesScreen />
   {:else if screen === 'settings'}
     <SettingsScreen />
   {:else}
