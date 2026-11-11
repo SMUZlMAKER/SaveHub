@@ -39,11 +39,6 @@ pub fn get_token() -> AdapterResult<Option<String>> {
     result
 }
 
-#[cfg(not(windows))]
-pub fn get_token() -> AdapterResult<Option<String>> {
-    Err(AdapterError::UnsupportedPlatform)
-}
-
 #[cfg(windows)]
 pub fn has_token() -> AdapterResult<bool> {
     use std::{ffi::c_void, ptr};
@@ -104,6 +99,11 @@ pub fn set_token(token: &str) -> AdapterResult<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn get_token() -> AdapterResult<Option<String>> {
+    Err(AdapterError::UnsupportedPlatform)
 }
 
 #[cfg(not(windows))]
