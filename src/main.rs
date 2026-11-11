@@ -1,5 +1,5 @@
-// В релизной сборке под Windows не открываем консольное окно рядом с GUI
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// SaveHub запускается без консольного окна, в том числе из ярлыка в dev-сборке.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use savehub::app::app;
 

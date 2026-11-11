@@ -7,12 +7,14 @@ use serde::{Deserialize, Serialize};
 pub struct Preferences {
     pub check_on_startup: bool,
     pub check_periodically: bool,
+    pub check_before_game_launch: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             check_on_startup: true,
             check_periodically: true,
+            check_before_game_launch: false,
         }
     }
 }
@@ -33,6 +35,7 @@ pub struct AppPreferences {
     pub launch_at_login: bool,
     pub check_on_startup: bool,
     pub check_periodically: bool,
+    pub check_before_game_launch: bool,
 }
 #[tauri::command]
 pub async fn get_app_preferences(

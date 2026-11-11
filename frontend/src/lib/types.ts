@@ -103,6 +103,7 @@ export interface Settings {
   syncAfterSession: boolean;
   syncWhileGaming: boolean;
   autoSwitchProfile: boolean;
+  askProfileBeforeLaunch: boolean;
 }
 
 export type ApiErrorKind = "notImplemented" | "rejected" | "internal";
@@ -118,6 +119,7 @@ export interface AppPreferences {
   launchAtLogin: boolean;
   checkOnStartup: boolean;
   checkPeriodically: boolean;
+  checkBeforeGameLaunch: boolean;
 }
 export interface UpdateStatus {
   currentVersion: string;
@@ -148,4 +150,25 @@ export interface PathValidation {
 export interface SaveSuggestion {
   game: string;
   saveDirs: string[];
+}
+
+export interface LaunchProfile { id: string; name: string; isActive: boolean }
+export interface LaunchStatus {
+  requestId: string | null;
+  gameId: string | null;
+  gameName: string | null;
+  phase: 'idle' | 'preparing' | 'starting' | 'awaitingProfile' | 'running' | 'stopped' | 'cancelled' | 'error';
+  profiles: LaunchProfile[];
+  activeProfileId: string | null;
+  warnings: string[];
+  error: string | null;
+  pid: number | null;
+  monitorError: string | null;
+}
+export interface Shortcut { path: string }
+export interface GameProcessEvent {
+  gameId: string;
+  state: 'started' | 'stopped' | 'unknown';
+  pid: number | null;
+  error: string | null;
 }

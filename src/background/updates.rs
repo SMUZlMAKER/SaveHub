@@ -11,7 +11,10 @@ pub fn spawn(app: tauri::AppHandle) {
         // Первый tick немедленный; проверка при запуске управляется отдельно.
         interval.tick().await;
         let startup = state.check_preferences().check_on_startup;
-        if startup && state.status().configured {
+        if startup
+            && !std::env::args().any(|arg| arg == "--launch-game")
+            && state.status().configured
+        {
             let _ = state.check(&app).await;
         }
         loop {

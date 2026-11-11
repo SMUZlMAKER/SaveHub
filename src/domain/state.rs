@@ -260,6 +260,14 @@ impl Settings {
         inner.data.auto_switch_profile = enabled;
     }
 
+    pub fn set_ask_profile_before_launch(&self, enabled: bool) {
+        self.inner
+            .write()
+            .expect("Settings lock poisoned")
+            .data
+            .ask_profile_before_launch = enabled;
+    }
+
     pub fn set_start_minimized(&self, enabled: bool) {
         let mut inner = self.inner.write().expect("Settings lock poisoned");
         inner.data.start_minimized = enabled;
@@ -300,6 +308,7 @@ mod tests {
                 sync_after_session: false,
                 sync_while_gaming: false,
                 auto_switch_profile: false,
+                ask_profile_before_launch: true,
                 start_minimized: false,
             },
             LocalConfig {

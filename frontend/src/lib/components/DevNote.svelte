@@ -1,6 +1,6 @@
 <!-- Подсказка для разработчиков: какие ручки вызывает экран. Видна только в `tauri dev`. -->
 <script lang="ts">
-  let { commands, file }: { commands: string[]; file: string } = $props()
+  let { commands, file, notes = [] }: { commands: string[]; file: string; notes?: string[] } = $props()
 </script>
 
 {#if import.meta.env.DEV}
@@ -8,6 +8,7 @@
     <strong>Для бэка</strong> · {file}: {#each commands as command, i (command)}{i > 0 ? ', ' : ''}<code
         >{command}</code
       >{/each}
+    {#each notes as note}<p>{note}</p>{/each}
   </aside>
 {/if}
 

@@ -10,8 +10,16 @@ use crate::domain::{
 use crate::services::{game::GameService, profile::ProfileService, settings::SettingsService};
 
 pub fn start() {
+    crate::adapters::app_identity::initialize()
+        .expect("Не удалось настроить идентификацию SaveHub в Windows");
     // TODO: прочитать конфигурацию, создать хранилища и сервисы, запустить RepoWorker (см. app/mod.rs)
     tauri::Builder::default()
+        .manage(crate::app::launch::Launches::default())
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !args.iter().any(|arg| arg == "--autostart") {
+                crate::app::launch::handle_arguments(app.clone(), args);
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
@@ -21,6 +29,12 @@ pub fn start() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            api::launch::get_launch_status,
+            api::launch::dismiss_launch_dialog,
+            api::launch::create_game_shortcut,
+            api::launch::begin_game_launch,
+            api::launch::confirm_game_launch,
+            api::launch::cancel_game_launch,
             api::games::list_games,
             api::games::get_game_status,
             api::games::add_game,
@@ -63,6 +77,7 @@ pub fn start() {
                 sync_after_session: true,
                 sync_while_gaming: false,
                 auto_switch_profile: true,
+                ask_profile_before_launch: true,
                 start_minimized: false,
             };
             let settings_data = config::read_settings(&settings_path)
@@ -117,6 +132,17 @@ pub fn start() {
                 runtime.clone(),
                 settings.clone(),
             ));
+            let process_service = Arc::new(crate::services::process::ProcessService::new(
+                catalog.clone(),
+                runtime.clone(),
+                settings.clone(),
+            ));
+            app.manage(Arc::new(crate::workflows::launch_game::LaunchGame::new(
+                process_service.clone(),
+                profile_service.clone(),
+                settings.clone(),
+            )));
+            app.manage(process_service);
             app.manage(game_service);
             app.manage(profile_service);
             app.manage(settings);
@@ -124,18 +150,25 @@ pub fn start() {
             app.manage(runtime);
             tray::setup(app.handle())?;
             app.manage(crate::app::updates::Updates::load(app.handle())?);
-            if !std::env::args().any(|arg| arg == "--autostart") {
+            app.manage(crate::app::launch::LaunchReady);
+            if !std::env::args().any(|arg| arg == "--autostart" || arg == "--launch-game") {
                 if let Some(window) = app.get_webview_window("main") {
                     window.show()?;
                 }
             }
+            crate::background::processes::spawn(app.handle().clone());
             crate::background::updates::spawn(app.handle().clone());
+            let args: Vec<String> = std::env::args().collect();
+            if args.iter().any(|arg| arg == "--launch-game") {
+                crate::app::launch::handle_arguments(app.handle().clone(), args);
+            }
             Ok(())
         })
         // Приложение живет в трее: крестик прячет окно, а не завершает процесс
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api: close, .. } = event {
                 close.prevent_close();
+                let _ = crate::app::launch::cancel(window.app_handle(), None);
                 let _ = window.hide();
             }
         })

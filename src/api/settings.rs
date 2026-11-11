@@ -20,6 +20,7 @@ pub struct SettingsDto {
     pub sync_while_gaming: bool,
     /// Переключать профиль на того, кто последним запускал игру.
     pub auto_switch_profile: bool,
+    pub ask_profile_before_launch: bool,
 }
 
 /// TODO(backend): хранилище Settings.
@@ -35,6 +36,7 @@ pub fn get_settings(service: State<'_, Arc<SettingsService>>) -> ApiResult<Setti
         sync_after_session: data.sync_after_session,
         sync_while_gaming: data.sync_while_gaming,
         auto_switch_profile: data.auto_switch_profile,
+        ask_profile_before_launch: data.ask_profile_before_launch,
     })
 }
 
@@ -52,6 +54,7 @@ pub fn update_settings(
     service.set_sync_after_session(settings.sync_after_session)?;
     service.set_sync_while_gaming(settings.sync_while_gaming)?;
     service.set_auto_switch_profile(settings.auto_switch_profile)?;
+    service.set_ask_profile_before_launch(settings.ask_profile_before_launch)?;
     Ok(())
 }
 
