@@ -114,6 +114,3 @@ export interface UpdateStatus {
   lastCheckedAt: number | null
   error: string | null
 }
-
-/** Значение токена, запрашиваемое только при явном раскрытии в настройках. */
-export type GithubToken = string | null
