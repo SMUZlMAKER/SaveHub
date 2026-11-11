@@ -74,6 +74,17 @@ pub fn trees_equal(left: &Path, right: &Path) -> AdapterResult<bool> {
     Ok(true)
 }
 
+/// Replace a directory link with an ordinary copy, preserving the target and old link.
+pub fn detach_directory_link(source: &Path) -> AdapterResult<()> {
+    if read_symlink(source)?.is_none() {
+        return Ok(());
+    }
+    let staged = source.with_file_name(format!(".savehub-detach-{}", uuid::Uuid::new_v4()));
+    copy_tree(source, &staged)?;
+    replace_directory(source, &staged)?;
+    Ok(())
+}
+
 /// Resolve an existing path, including a managed root link.
 pub fn canonicalize(path: &Path) -> AdapterResult<PathBuf> {
     fs::canonicalize(path).map_err(|error| io_error(path, error))

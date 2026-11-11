@@ -77,6 +77,14 @@ impl SaveService {
     fn target(&self, game: GameId, profile: &Profile) -> ServiceResult<PathBuf> {
         let tree = git::prepare_worktree(&self.root()?, &profile.branch, &profile.id.to_string())
             .map_err(ServiceError::Adapter)?;
+        if !git::conflict_paths(&tree)
+            .map_err(ServiceError::Adapter)?
+            .is_empty()
+        {
+            return Err(ServiceError::Conflict(
+                "Сначала разрешите конфликты профиля".into(),
+            ));
+        }
         let path = tree.join("games").join(game.to_string());
         fs::require_plain_path(&tree, &path).map_err(ServiceError::Adapter)?;
         Ok(path)
@@ -133,7 +141,14 @@ impl SaveService {
         }
         let actual = fs::canonicalize(source).map_err(ServiceError::Adapter)?;
         for profile in self.catalog.profiles().values() {
-            let expected = self.target(game, profile)?;
+            let Some(tree) =
+                git::existing_worktree(&self.root()?, &profile.branch, &profile.id.to_string())
+                    .map_err(ServiceError::Adapter)?
+            else {
+                continue;
+            };
+            let expected = tree.join("games").join(game.to_string());
+            fs::require_plain_path(&tree, &expected).map_err(ServiceError::Adapter)?;
             if fs::exists(&expected).map_err(ServiceError::Adapter)?
                 && fs::canonicalize(&expected).map_err(ServiceError::Adapter)? == actual
             {
@@ -151,13 +166,53 @@ impl SaveService {
             return Ok(0);
         }
         let profile = self.profile(&profile_id.to_string())?;
+        let Some(tree) =
+            git::existing_worktree(&self.root()?, &profile.branch, &profile.id.to_string())
+                .map_err(ServiceError::Adapter)?
+        else {
+            return Ok(0);
+        };
         let mut count = 0;
         for game in self.catalog.games().keys() {
-            if fs::is_directory(&self.target(*game, &profile)?).map_err(ServiceError::Adapter)? {
+            let target = tree.join("games").join(game.to_string());
+            fs::require_plain_path(&tree, &target).map_err(ServiceError::Adapter)?;
+            if fs::is_directory(&target).map_err(ServiceError::Adapter)? {
                 count += 1;
             }
         }
         Ok(count)
+    }
+
+    /// A delayed stop belongs to the original managed tree, even if game metadata changed.
+    pub fn capture_session(
+        &self,
+        game: GameId,
+        profile_id: ProfileId,
+    ) -> ServiceResult<Option<Save>> {
+        let _guard = self.lock()?;
+        self.stopped(game)?;
+        let profile = self.profile(&profile_id.to_string())?;
+        let Some(tree) =
+            git::existing_worktree(&self.root()?, &profile.branch, &profile.id.to_string())
+                .map_err(ServiceError::Adapter)?
+        else {
+            return Ok(None);
+        };
+        if !git::conflict_paths(&tree)
+            .map_err(ServiceError::Adapter)?
+            .is_empty()
+        {
+            return Err(ServiceError::Conflict(
+                "Сначала разрешите конфликты завершённой сессии".into(),
+            ));
+        }
+        let target = tree.join("games").join(game.to_string());
+        fs::require_plain_path(&tree, &target).map_err(ServiceError::Adapter)?;
+        if !fs::is_directory(&target).map_err(ServiceError::Adapter)? {
+            return Ok(None);
+        }
+        self.snapshot_tree(game, &profile, SaveKind::AfterSession, &target)
+            .map(Some)
     }
 
     pub fn is_bound(&self, game: GameId, profile: &ProfileId) -> ServiceResult<bool> {
@@ -313,6 +368,16 @@ impl SaveService {
         } else {
             target
         };
+        self.snapshot_tree(game, profile, kind, &data)
+    }
+
+    fn snapshot_tree(
+        &self,
+        game: GameId,
+        profile: &Profile,
+        kind: SaveKind,
+        data: &std::path::Path,
+    ) -> ServiceResult<Save> {
         let history = self.history()?;
         fs::create_dir_all(&history).map_err(ServiceError::Adapter)?;
         let mut saves = config::read_saves(&history.join("index.json"))
@@ -418,22 +483,55 @@ impl SaveService {
         let target = self.target(save.game_id, &profile)?;
         let source = self.source(save.game_id)?;
         self.validate_link(save.game_id, &source)?;
-        let destination = if fs::read_symlink(&source)
+        let linked = fs::read_symlink(&source)
             .map_err(ServiceError::Adapter)?
-            .is_none()
-            && fs::exists(&source).map_err(ServiceError::Adapter)?
-        {
-            source
-        } else {
-            target
-        };
-        let staged =
-            destination.with_file_name(format!(".savehub-restore-{}", uuid::Uuid::new_v4()));
-        fs::copy_tree(&snapshot, &staged).map_err(ServiceError::Adapter)?;
+            .is_some();
         self.create_inner(save.game_id, &profile, SaveKind::BeforeRestore)?;
+        // An unbound live directory and an older managed copy may both contain unique data.
+        if !linked
+            && fs::exists(&source).map_err(ServiceError::Adapter)?
+            && !fs::trees_equal(&source, &target).map_err(ServiceError::Adapter)?
+        {
+            self.snapshot_tree(save.game_id, &profile, SaveKind::BeforeRestore, &target)?;
+        }
+        let staged = target.with_file_name(format!(".savehub-restore-{}", uuid::Uuid::new_v4()));
+        fs::copy_tree(&snapshot, &staged).map_err(ServiceError::Adapter)?;
         self.stopped(save.game_id)?;
-        let backup = fs::replace_directory(&destination, &staged).map_err(ServiceError::Adapter)?;
-        // The complete previous contents are already published in BeforeRestore.
+        let backup = fs::replace_directory(&target, &staged).map_err(ServiceError::Adapter)?;
+        if !linked {
+            let original =
+                source.with_file_name(format!(".savehub-original-{}", uuid::Uuid::new_v4()));
+            let existed = fs::exists(&source).map_err(ServiceError::Adapter)?;
+            let binding = (|| {
+                if existed {
+                    fs::rename(&source, &original)?;
+                }
+                if let Err(error) = fs::create_symlink(&source, &target) {
+                    if existed {
+                        fs::rename(&original, &source)?;
+                    }
+                    return Err(error);
+                }
+                Ok(())
+            })();
+            if let Err(error) = binding {
+                let rollback = (|| {
+                    fs::rename(&target, &staged)?;
+                    fs::rename(&backup, &target)
+                })();
+                return match rollback {
+                    Ok(()) => {
+                        let _ = fs::remove_tree(&staged);
+                        Err(ServiceError::Adapter(error))
+                    }
+                    Err(rollback) => Err(ServiceError::Conflict(format!(
+                        "Восстановление привязки: {error:?}; откат: {rollback:?}; резервная копия: {}",
+                        backup.display()
+                    ))),
+                };
+            }
+        }
+        // Both previous versions have durable snapshots; a regular live source also remains beside the link.
         fs::remove_tree(&backup).map_err(ServiceError::Adapter)?;
         Ok(())
     }
@@ -772,5 +870,115 @@ mod tests {
             fs::read(&f.source.join("save.dat")).unwrap(),
             b"original\0\xff"
         );
+    }
+    #[test]
+    fn restore_reconnects_a_missing_game_directory() {
+        let f = Fixture::new();
+        f.bind();
+        let save = f.snapshot();
+        fs::remove_symlink(&f.source).unwrap();
+        std::fs::write(f.target().join("save.dat"), b"changed").unwrap();
+        f.service.apply_save(&save.id).unwrap();
+        assert!(f.service.is_bound(f.game, &f.profile).unwrap());
+        assert_eq!(
+            fs::read(&f.source.join("save.dat")).unwrap(),
+            b"original\0\xff"
+        );
+    }
+
+    #[test]
+    fn restore_unbound_data_preserves_both_previous_versions_and_allows_launch_binding() {
+        let f = Fixture::new();
+        let save = f.snapshot();
+        std::fs::write(f.source.join("save.dat"), b"live").unwrap();
+        std::fs::write(f.target().join("save.dat"), b"managed").unwrap();
+        f.service.apply_save(&save.id).unwrap();
+        f.bind();
+        assert_eq!(
+            fs::read(&f.source.join("save.dat")).unwrap(),
+            b"original\0\xff"
+        );
+        let versions: Vec<_> = f
+            .service
+            .list(None, None)
+            .unwrap()
+            .iter()
+            .map(|s| fs::read(&f.service.history().unwrap().join(&s.id).join("save.dat")).unwrap())
+            .collect();
+        assert!(versions.contains(&b"live".to_vec()));
+        assert!(versions.contains(&b"managed".to_vec()));
+    }
+
+    #[test]
+    fn reading_counts_and_validating_a_binding_does_not_create_profile_branches() {
+        let f = Fixture::new();
+        f.bind();
+        let other = uuid::Uuid::new_v4();
+        f.service.catalog.add_profile(Profile {
+            id: other,
+            name: "Remote".into(),
+            branch: "not-fetched".into(),
+            last_played_game: None,
+        });
+        assert_eq!(f.service.games_count(&other).unwrap(), 0);
+        f.snapshot();
+        assert_eq!(
+            git::list_branches(&f.service.root().unwrap()).unwrap(),
+            vec!["main"]
+        );
+    }
+
+    #[test]
+    fn git_conflicts_block_restore_even_when_runtime_has_not_loaded_them() {
+        let f = Fixture::new();
+        f.bind();
+        let save = f.snapshot();
+        let root = f.service.root().unwrap();
+        let path = PathBuf::from(format!("games/{}/save.dat", f.game));
+        git::stage(&root, std::slice::from_ref(&path)).unwrap();
+        let base = git::commit(&root, "base").unwrap();
+        let other = f.dir.join("other");
+        git::create_worktree(&root, "other", &other, Some(&base)).unwrap();
+        std::fs::write(root.join(&path), b"local\n").unwrap();
+        git::stage(&root, std::slice::from_ref(&path)).unwrap();
+        git::commit(&root, "local").unwrap();
+        std::fs::write(other.join(&path), b"remote\n").unwrap();
+        git::stage(&other, std::slice::from_ref(&path)).unwrap();
+        let remote = git::commit(&other, "remote").unwrap();
+        assert!(matches!(
+            git::merge(&root, &remote, false).unwrap(),
+            git::MergeOutcome::Conflicts(_)
+        ));
+        assert!(f.service.runtime.conflicts().is_empty());
+        let before = fs::read(&f.source.join("save.dat")).unwrap();
+        assert!(matches!(
+            f.service.apply_save(&save.id),
+            Err(ServiceError::Conflict(_))
+        ));
+        assert_eq!(fs::read(&f.source.join("save.dat")).unwrap(), before);
+        assert!(f.service.bind(f.game, &f.profile.to_string()).is_err());
+    }
+    #[test]
+    fn delayed_session_snapshot_uses_original_tree_after_game_was_ignored_or_deleted() {
+        let f = Fixture::new();
+        f.bind();
+        f.service.runtime.set_running_games(vec![f.game]);
+        f.service.runtime.set_running_games(vec![]);
+        f.service
+            .settings
+            .add_game_resolution(f.game, PathResolution::Ignore);
+        f.service.catalog.remove_game(f.game);
+        let save = f
+            .service
+            .capture_session(f.game, f.profile)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(save.kind, SaveKind::AfterSession));
+        assert_eq!(
+            fs::read(&f.service.history().unwrap().join(save.id).join("save.dat")).unwrap(),
+            b"original\0\xff"
+        );
+        f.service.runtime.acknowledge_session(f.game, f.profile);
+        assert!(f.service.runtime.pending_sessions().is_empty());
     }
 }

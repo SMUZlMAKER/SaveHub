@@ -13,39 +13,35 @@ pub fn spawn(app: tauri::AppHandle) {
         let processes = app.state::<Arc<ProcessService>>().inner().clone();
         let mut failed = false;
         loop {
+            let mut saves_changed = false;
             let update = {
                 let operations = app.state::<Arc<std::sync::Mutex<()>>>();
                 let _guard = operations
                     .lock()
                     .expect("Repository operations lock poisoned");
                 let result = processes.refresh_running_games();
-                if let Ok(changes) = &result {
+                if result.is_ok() {
                     let settings = app.state::<Arc<crate::domain::Settings>>();
                     let runtime = app.state::<Arc<crate::domain::RuntimeState>>();
-                    if settings.data().local_repo_path.is_some() {
-                        if let Some(profile) = runtime.active_profile() {
-                            let saves = app.state::<Arc<crate::services::save::SaveService>>();
-                            for event in changes {
-                                if let GameProcessEvent::Stopped(game) = event {
-                                    let snapshot = (|| -> crate::services::ServiceResult<()> {
-                                        if saves.is_bound(*game, &profile)? {
-                                            saves.create_save(
-                                                *game,
-                                                &profile.to_string(),
-                                                crate::domain::SaveKind::AfterSession,
-                                            )?;
-                                        }
-                                        Ok(())
-                                    })();
-                                    if let Err(error) = snapshot {
-                                        let mut status = runtime.sync_status();
-                                        status.state = crate::domain::SyncState::Error;
-                                        status.error = Some(format!(
-                                            "Не удалось сохранить завершённую сессию: {error:?}"
-                                        ));
-                                        runtime.set_sync_status(status);
-                                    }
-                                }
+                    let saves = app.state::<Arc<crate::services::save::SaveService>>();
+                    for (game, profile) in runtime.pending_sessions() {
+                        let snapshot = (|| -> crate::services::ServiceResult<()> {
+                            if settings.data().local_repo_path.is_some() {
+                                saves_changed |= saves.capture_session(game, profile)?.is_some();
+                            }
+                            Ok(())
+                        })();
+                        match snapshot {
+                            Ok(()) => {
+                                runtime.acknowledge_session(game, profile);
+                            }
+                            Err(error) => {
+                                let mut status = runtime.sync_status();
+                                status.state = crate::domain::SyncState::Error;
+                                status.error = Some(format!(
+                                    "Не удалось сохранить завершённую сессию: {error:?}"
+                                ));
+                                runtime.set_sync_status(status);
                             }
                         }
                     }
@@ -87,9 +83,10 @@ pub fn spawn(app: tauri::AppHandle) {
                             launches.mark_stopped(&app, id);
                         }
                     }
-                    if changes
-                        .iter()
-                        .any(|event| matches!(event, GameProcessEvent::Stopped(_)))
+                    if saves_changed
+                        || changes
+                            .iter()
+                            .any(|event| matches!(event, GameProcessEvent::Stopped(_)))
                     {
                         let _ = app.emit(events::SAVES_CHANGED, ());
                         if let Some(worker) =

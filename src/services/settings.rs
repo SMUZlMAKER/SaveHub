@@ -28,6 +28,7 @@ pub struct SettingsService {
     settings: Arc<Settings>,
     path: std::path::PathBuf,
     operations: Arc<Mutex<()>>,
+    bindings: Option<(Arc<Catalog>, Arc<RuntimeState>)>,
 }
 
 impl SettingsService {
@@ -40,7 +41,13 @@ impl SettingsService {
             settings,
             path,
             operations,
+            bindings: None,
         }
+    }
+
+    pub fn with_bindings(mut self, catalog: Arc<Catalog>, runtime: Arc<RuntimeState>) -> Self {
+        self.bindings = Some((catalog, runtime));
+        self
     }
 
     /// Захватывает operations; вызывающий код не должен уже удерживать этот mutex.
@@ -67,6 +74,25 @@ impl SettingsService {
             }
         }
 
+        if data.local_repo_path != self.settings.data().local_repo_path {
+            if let Some((catalog, runtime)) = &self.bindings {
+                if !runtime.pending_sessions().is_empty() {
+                    return Err(ServiceError::Conflict(
+                        "Дождитесь сохранения завершённой игровой сессии перед сменой репозитория"
+                            .into(),
+                    ));
+                }
+                let mut affected = Vec::new();
+                for game in catalog.games().values() {
+                    affected.extend(
+                        super::bindings::linked_paths(game, &self.settings.local())?
+                            .into_iter()
+                            .map(|p| (game.id, p)),
+                    );
+                }
+                super::bindings::detach(catalog, runtime, &self.settings, &affected)?;
+            }
+        }
         crate::adapters::config::write_settings(&self.path, &data)
             .map_err(ServiceError::Adapter)?;
         self.settings.replace_data(data);

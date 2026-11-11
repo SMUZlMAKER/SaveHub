@@ -172,6 +172,16 @@ impl RepoService {
         self.stopped()?;
         if self
             .runtime
+            .pending_sessions()
+            .iter()
+            .any(|(_, profile)| profile == profile_id)
+        {
+            return Err(ServiceError::Conflict(
+                "Дождитесь сохранения завершённой игровой сессии".into(),
+            ));
+        }
+        if self
+            .runtime
             .conflicts()
             .iter()
             .any(|conflict| conflict.profile_id == *profile_id)
@@ -188,6 +198,24 @@ impl RepoService {
             .ok_or_else(|| {
                 ServiceError::InvalidInput("Сначала настройте локальный Git-репозиторий".into())
             })?;
+        if let Some(tree) = git::existing_worktree(&root, &profile.branch, &profile.id.to_string())
+            .map_err(ServiceError::Adapter)?
+        {
+            let tree = fs::canonicalize(&tree).map_err(ServiceError::Adapter)?;
+            for game in self.catalog.games().values() {
+                for source in super::bindings::linked_paths(game, &self.settings.local())? {
+                    if fs::canonicalize(&source)
+                        .map_err(ServiceError::Adapter)?
+                        .starts_with(tree.join("games").join(game.id.to_string()))
+                    {
+                        return Err(ServiceError::Conflict(
+                            "На профиль ещё ссылается папка игры. Сначала отключите её сохранения"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+        }
         let (_, _, lease) = self.lease(&root, &profile)?;
         if lease.is_some_and(|lease| {
             lease.expires_at > now() && lease.machine_id != self.settings.local().machine_id
@@ -921,6 +949,32 @@ mod tests {
     }
 
     #[test]
+    fn ignored_legacy_binding_blocks_profile_deletion() {
+        let fixture = Fixture::new();
+        fixture.service.runtime.set_running_games(Vec::new());
+        let target = fixture
+            .tree()
+            .join("games")
+            .join(fixture.game.id.to_string());
+        fs::create_dir_all(&target).unwrap();
+        fs::write_atomic(&target.join("save"), b"progress").unwrap();
+        let source = fixture.dir.join("live");
+        fs::create_symlink(&source, &target).unwrap();
+        let mut game = fixture.game.clone();
+        game.paths.save_dir_path = source.to_string_lossy().into();
+        fixture.service.catalog.update_game(game);
+        fixture
+            .service
+            .settings
+            .add_game_resolution(fixture.game.id, PathResolution::Ignore);
+        assert!(matches!(
+            fixture.service.delete_profile(&fixture.profile.id),
+            Err(ServiceError::Conflict(_))
+        ));
+        assert_eq!(fs::read(&source.join("save")).unwrap(), b"progress");
+    }
+
+    #[test]
     fn incomplete_save_staging_is_never_checkpointed() {
         let fixture = Fixture::new();
         fixture.service.runtime.set_running_games(Vec::new());
@@ -1304,9 +1358,30 @@ pub trait RepoOperations: Send + Sync + 'static {
     fn push(&self, profile: &ProfileId) -> ServiceResult<()>;
     fn fetch(&self) -> ServiceResult<()>;
     fn has_unpushed_commits(&self, profile: &ProfileId) -> ServiceResult<bool>;
+    /// Discover durable unpublished branches, including inactive profiles after restart.
+    fn unpushed_profiles(&self) -> ServiceResult<Vec<ProfileId>>;
 }
 
 impl RepoOperations for RepoService {
+    fn unpushed_profiles(&self) -> ServiceResult<Vec<ProfileId>> {
+        let _guard = self.lock()?;
+        let (root, _) = self.repository()?;
+        let branches = git::list_branches(&root).map_err(ServiceError::Adapter)?;
+        let mut pending = Vec::new();
+        for profile in self.catalog.profiles().values() {
+            // Remote-only profiles have no local commit to publish. Discovery must
+            // never create a branch/worktree as a side effect of reading its refs.
+            if branches.contains(&profile.branch)
+                && git::has_unpushed_commits(&root, &profile.branch)
+                    .map_err(ServiceError::Adapter)?
+            {
+                pending.push(profile.id);
+            }
+        }
+        pending.sort();
+        Ok(pending)
+    }
+
     fn configuration(&self) -> Option<RepositoryConfig> {
         self.configuration()
     }

@@ -265,6 +265,9 @@ impl GameService {
         }
         ordered.sort_by_key(|game| game.id);
         let previous_local = self.settings.local();
+        let affected =
+            super::bindings::changing_bindings(&self.catalog, &previous_local, &games, &local)?;
+        super::bindings::detach(&self.catalog, &self.runtime, &self.settings, &affected)?;
         let shared_changed = games != self.catalog.games();
         let local_changed = local != previous_local;
         let directory = self
@@ -349,7 +352,19 @@ impl GameService {
                     .ok_or_else(|| {
                         ServiceError::InvalidInput("Удалённый каталог не найден".into())
                     })?;
-                Self::decode(&bytes)?;
+                let remote = Self::decode(&bytes)?;
+                if git::will_fast_forward(&root, catalog_git::REMOTE_REF)
+                    .map_err(ServiceError::Adapter)?
+                    && !super::bindings::changing_bindings(
+                        &self.catalog,
+                        &self.settings.local(),
+                        &remote,
+                        &self.settings.local(),
+                    )?
+                    .is_empty()
+                {
+                    return Err(ServiceError::Conflict("Удалённый каталог меняет привязанные игры. Сначала измените их локальные пути или отключите сохранения на этом ПК".into()));
+                }
             }
             Ok(empty)
         })();
@@ -1155,5 +1170,137 @@ mod tests {
         });
         drop(service);
         assert_eq!(fixture.service("pc").list().unwrap().len(), 8);
+    }
+    fn bound_game(fixture: &Fixture, service: &GameService) -> (Game, PathBuf, ProfileId) {
+        let mut paths = valid_local_paths(fixture);
+        let live = fixture.0.join("live");
+        std::fs::create_dir(&live).unwrap();
+        paths.save_dir_path = live.to_string_lossy().into_owned();
+        std::fs::write(
+            std::path::Path::new(&paths.save_dir_path).join("save.dat"),
+            b"progress",
+        )
+        .unwrap();
+        let game = service.add("Bound", paths, vec![]).unwrap();
+        let root = fixture.0.join("save-repo");
+        git2::Repository::init(&root).unwrap();
+        let commit = git::commit_files(&root, None, &[], "initial").unwrap();
+        git::create_branch(&root, "main", &commit).unwrap();
+        git::checkout(&root, "main").unwrap();
+        let profile = uuid::Uuid::new_v4();
+        service.catalog.add_profile(Profile {
+            id: profile,
+            name: "Profile".into(),
+            branch: "main".into(),
+            last_played_game: None,
+        });
+        service.runtime.set_active_profile(Some(profile)).unwrap();
+        service.settings.set_repository(None, Some(root.clone()));
+        crate::services::save::SaveService::new(
+            service.catalog.clone(),
+            service.runtime.clone(),
+            service.settings.clone(),
+        )
+        .bind(game.id, &profile.to_string())
+        .unwrap();
+        (game, root, profile)
+    }
+
+    #[test]
+    fn ignoring_bound_game_preserves_real_live_files_before_forgetting_the_binding() {
+        let fixture = Fixture::new();
+        let service = fixture.service("pc");
+        let (game, root, _) = bound_game(&fixture, &service);
+        service
+            .resolve_paths(game.id, PathResolution::Ignore)
+            .unwrap();
+        let source = std::path::Path::new(&game.paths.save_dir_path);
+        assert!(crate::adapters::fs::read_symlink(source).unwrap().is_none());
+        assert_eq!(std::fs::read(source.join("save.dat")).unwrap(), b"progress");
+        assert_eq!(
+            std::fs::read(root.join(format!("games/{}/save.dat", game.id))).unwrap(),
+            b"progress"
+        );
+    }
+
+    #[test]
+    fn repository_change_detaches_bindings_and_running_games_block_it() {
+        let fixture = Fixture::new();
+        let service = fixture.service("pc");
+        let (game, root, _) = bound_game(&fixture, &service);
+        let settings = crate::services::settings::SettingsService::new(
+            service.settings.clone(),
+            fixture.0.join("settings.json"),
+            Arc::new(Mutex::new(())),
+        )
+        .with_bindings(service.catalog.clone(), service.runtime.clone());
+        service.runtime.set_running_games(vec![game.id]);
+        assert!(matches!(
+            settings.set_repository(None, None),
+            Err(ServiceError::GameRunning(_))
+        ));
+        assert_eq!(service.settings.data().local_repo_path, Some(root));
+        service.runtime.set_running_games(vec![]);
+        assert!(matches!(
+            settings.set_repository(None, None),
+            Err(ServiceError::Conflict(_))
+        ));
+        for (game, profile) in service.runtime.pending_sessions() {
+            service.runtime.acknowledge_session(game, profile);
+        }
+        settings.set_repository(None, None).unwrap();
+        let source = std::path::Path::new(&game.paths.save_dir_path);
+        assert!(crate::adapters::fs::read_symlink(source).unwrap().is_none());
+        assert_eq!(std::fs::read(source.join("save.dat")).unwrap(), b"progress");
+    }
+
+    #[test]
+    fn remote_path_change_is_rejected_before_fast_forward_of_a_bound_game() {
+        let fixture = Fixture::new();
+        let remote = fixture.remote();
+        let one = fixture.service("one");
+        let (game, _, _) = bound_game(&fixture, &one);
+        one.sync_remote(remote.to_str().unwrap(), "").unwrap();
+        let two = fixture.service("two");
+        two.sync_remote(remote.to_str().unwrap(), "").unwrap();
+        let mut changed = two.get(game.id).unwrap();
+        changed.paths.save_dir_path = fixture.0.join("elsewhere").to_string_lossy().into();
+        // Another machine does not have this machine's junction at the shared path.
+        config::write_games(&two.root().unwrap().join(catalog_git::FILE), &[changed]).unwrap();
+        catalog_git::checkpoint(&two.root().unwrap()).unwrap();
+        two.sync_remote(remote.to_str().unwrap(), "").unwrap();
+        let head = git::head(&one.root().unwrap()).unwrap();
+        assert!(matches!(
+            one.sync_remote(remote.to_str().unwrap(), ""),
+            Err(ServiceError::Conflict(_))
+        ));
+        assert_eq!(git::head(&one.root().unwrap()).unwrap(), head);
+        assert!(
+            crate::adapters::fs::read_symlink(std::path::Path::new(&game.paths.save_dir_path))
+                .unwrap()
+                .is_some()
+        );
+    }
+    #[test]
+    fn deleting_or_repointing_bound_game_detaches_old_directory() {
+        for delete in [false, true] {
+            let fixture = Fixture::new();
+            let service = fixture.service("pc");
+            let (game, _, _) = bound_game(&fixture, &service);
+            if delete {
+                service.delete(game.id).unwrap();
+            } else {
+                let new_source = fixture.0.join("new-live");
+                std::fs::create_dir(&new_source).unwrap();
+                let mut paths = game.paths.clone();
+                paths.save_dir_path = new_source.to_string_lossy().into();
+                service
+                    .resolve_paths(game.id, PathResolution::UseLocal(paths))
+                    .unwrap();
+            }
+            let source = std::path::Path::new(&game.paths.save_dir_path);
+            assert!(crate::adapters::fs::read_symlink(source).unwrap().is_none());
+            assert_eq!(std::fs::read(source.join("save.dat")).unwrap(), b"progress");
+        }
     }
 }

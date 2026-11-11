@@ -36,6 +36,14 @@ impl ProcessService {
     }
 
     fn refresh(&self) -> ServiceResult<Vec<GameProcessEvent>> {
+        let result = self.refresh_inner();
+        if result.is_err() {
+            self.runtime.invalidate_process_state();
+        }
+        result
+    }
+
+    fn refresh_inner(&self) -> ServiceResult<Vec<GameProcessEvent>> {
         let processes = match process::list() {
             Ok(processes) => processes,
             Err(error) => {
@@ -65,7 +73,12 @@ impl ProcessService {
         }
         let local = self.settings.local();
         for game in self.catalog.games().values() {
-            let paths = effective_paths(game, &local);
+            let mut paths = effective_paths(game, &local);
+            // Legacy ignored entries can still own a junction. Keep observing them
+            // until their binding is safely detached by a metadata change.
+            if paths.is_none() && !super::bindings::linked_paths(game, &local)?.is_empty() {
+                paths = Some(game.paths.clone());
+            }
             if let Some(paths) = paths {
                 let exe = crate::adapters::fs::expand_path(&paths.exe_path)
                     .map_err(ServiceError::Adapter)?;
