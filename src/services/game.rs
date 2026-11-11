@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 pub struct GameService {
     catalog: Arc<Catalog>,
-    _runtime: Arc<RuntimeState>,
+    runtime: Arc<RuntimeState>,
     settings: Arc<Settings>,
 }
 
@@ -12,7 +12,7 @@ impl GameService {
     pub fn new(catalog: Arc<Catalog>, runtime: Arc<RuntimeState>, settings: Arc<Settings>) -> Self {
         Self {
             catalog,
-            _runtime: runtime,
+            runtime,
             settings,
         }
     }
@@ -132,6 +132,82 @@ impl GameService {
                 exe_path: exe,
             })
         }
+    }
+
+    /// Registration only: does not move, bind or publish any save files.
+    pub fn add_with_paths(&self, name: &str, paths: GamePaths) -> ServiceResult<Game> {
+        Self::validate_registration_paths(&paths)?;
+        let processes = Self::process_names(&paths);
+        self.add(name, paths, processes)
+    }
+
+    pub fn update_with_paths(
+        &self,
+        id: GameId,
+        name: &str,
+        paths: GamePaths,
+    ) -> ServiceResult<Game> {
+        self.ensure_editable(id)?;
+        Self::validate_registration_paths(&paths)?;
+        let current = self.get(id)?;
+        let local = self.settings.local();
+        match local.games.get(&id) {
+            Some(PathResolution::UseLocal(_)) | Some(PathResolution::Ignore) => {
+                // Editing a local override must not replace shared paths.
+                let game = self.update(id, name, current.paths, current.process_names)?;
+                self.resolve_paths(id, PathResolution::UseLocal(paths))?;
+                Ok(game)
+            }
+            _ => {
+                let processes = Self::process_names(&paths);
+                let game = self.update(id, name, paths, processes)?;
+                self.clear_local_resolution(id)?;
+                Ok(game)
+            }
+        }
+    }
+
+    pub fn use_local_paths(&self, id: GameId, paths: GamePaths) -> ServiceResult<Game> {
+        self.ensure_editable(id)?;
+        Self::validate_registration_paths(&paths)?;
+        self.resolve_paths(id, PathResolution::UseLocal(paths))?;
+        self.get(id)
+    }
+
+    pub fn ignore_on_this_pc(&self, id: GameId) -> ServiceResult<Game> {
+        self.ensure_editable(id)?;
+        self.resolve_paths(id, PathResolution::Ignore)?;
+        self.get(id)
+    }
+
+    fn ensure_editable(&self, id: GameId) -> ServiceResult<()> {
+        if self
+            .runtime
+            .running_games()
+            .is_some_and(|games| games.contains(&id))
+        {
+            return Err(ServiceError::GameRunning(vec![id]));
+        }
+        // Unknown process state permits registration only, never save-file operations.
+        Ok(())
+    }
+
+    fn validate_registration_paths(paths: &GamePaths) -> ServiceResult<()> {
+        let (exe, saves) = crate::adapters::game_paths::validate(paths);
+        if let Some(error) = exe {
+            return Err(ServiceError::InvalidInput(format!("Файл игры: {error}")));
+        }
+        if let Some(error) = saves {
+            return Err(ServiceError::InvalidInput(format!("Сохранения: {error}")));
+        }
+        Ok(())
+    }
+
+    fn process_names(paths: &GamePaths) -> Vec<String> {
+        std::path::Path::new(&paths.exe_path)
+            .file_name()
+            .map(|n| vec![n.to_string_lossy().into_owned()])
+            .unwrap_or_default()
     }
 
     pub fn reload_catalog(&self) -> ServiceResult<()> {
