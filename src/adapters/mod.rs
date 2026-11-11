@@ -16,3 +16,6 @@ pub mod fs;
 pub mod git;
 pub mod process;
 pub mod watcher;
+
+pub mod save_paths;
+pub mod game_paths;

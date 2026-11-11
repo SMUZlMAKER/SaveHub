@@ -1,111 +1,101 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, describeError, events, subscribe } from '../lib/api'
-  import { notice } from '../lib/notice.svelte'
   import type { Game, GameStatus } from '../lib/types'
-  import DevNote from '../lib/components/DevNote.svelte'
-  import Loadable from '../lib/components/Loadable.svelte'
+  import GameForm from '../lib/components/GameForm.svelte'
 
   const statusLabel: Record<GameStatus, { text: string; tone: string }> = {
-    found: { text: 'найдено', tone: 'ok' },
-    missing: { text: 'нужен путь', tone: 'warn' },
-    running: { text: 'запущена', tone: 'danger' },
+    found: { text: 'Пути найдены', tone: 'ok' },
+    missing: { text: 'Нужны пути', tone: 'warn' },
+    running: { text: 'Запущена', tone: 'danger' },
+    ignored: { text: 'Игнорируется', tone: '' },
   }
-
   let games = $state<Game[]>([])
   let loading = $state(true)
-  let loadError = $state<string | null>(null)
-
-  // id игры, для которой открыт ввод пути
-  let editingPathFor = $state<string | null>(null)
-  let pathDraft = $state('')
-
-  let newName = $state('')
-  let newPath = $state('')
-
+  let loadError = $state('')
+  let savedNote = $state('')
+  let editor = $state<{ mode: 'add' | 'edit' | 'resolve'; game?: Game } | null>(null)
+  let generation = 0
   async function load() {
+    const current = ++generation
+    loading = true; loadError = ''
     try {
-      games = await api.listGames()
-      loadError = null
-    } catch (e) {
-      loadError = describeError(e)
-    } finally {
-      loading = false
-    }
+      const result = await api.listGames()
+      if (current === generation) games = result
+    } catch (e) { if (current === generation) loadError = describeError(e) }
+    finally { if (current === generation) loading = false }
   }
-
-  async function savePath(game: Game) {
-    try {
-      await api.updateGame(game.id, game.name, pathDraft.trim())
-      editingPathFor = null
-      await load()
-    } catch (e) {
-      notice.error(e)
-    }
+  function saved(game: Game) {
+    // Do not hide a successful mutation behind a failing refresh or a late list response.
+    generation++; loading = false; loadError = ''
+    games = [...games.filter(g => g.id !== game.id), game].sort((a, b) => a.name.localeCompare(b.name))
+    editor = null; savedNote = `Настройки «${game.name}» применены для текущего запуска приложения.`
   }
-
-  async function addGame(event: SubmitEvent) {
-    event.preventDefault()
-    try {
-      await api.addGame(newName.trim(), newPath.trim())
-      newName = ''
-      newPath = ''
-      await load()
-    } catch (e) {
-      notice.error(e)
-    }
+  function edit(mode: 'add' | 'edit' | 'resolve', game?: Game) {
+    savedNote = ''; editor = { mode, game }
   }
-
-  onMount(() => {
-    load()
-    return subscribe(events.gamesChanged, load)
-  })
+  onMount(() => { load(); return subscribe(events.gamesChanged, load) })
 </script>
 
-<h2>Игры</h2>
-<p class="muted">Игры, сохранения которых переключаются и синхронизируются.</p>
-
-<Loadable {loading} error={loadError}>
+<div class="games-heading">
+  <div><h2>Игры</h2><p class="muted">Выберите игры и укажите, где находятся их сохранения.</p></div>
+  <button class="primary" disabled={editor !== null || loading || !!loadError} onclick={() => edit('add')}>Добавить игру</button>
+</div>
+<p class="setup-note">В этой версии список игр и локальные пути сохраняются только до закрытия приложения. Файлы игр и сохранений не изменяются.</p>
+{#if savedNote}<p class="success-note" role="status">{savedNote}</p>{/if}
+{#if editor}
+  {#key `${editor.mode}:${editor.game?.id ?? 'new'}`}
+    <GameForm mode={editor.mode} game={editor.game} onsaved={saved} oncancel={() => editor = null} />
+  {/key}
+{/if}
+{#if loading}
+  <p class="muted" role="status">Загружаем игры…</p>
+{:else if loadError}
+  <div class="card load-error" role="alert"><p class="error">{loadError}</p><button onclick={load}>Повторить</button></div>
+{:else if !games.length}
+  {#if !editor}
+    <div class="card empty-games"><h3>Добавьте первую игру</h3><p class="muted">Выберите exe — SaveHub попробует подсказать папку сохранений. Путь можно указать вручную.</p><button class="primary" onclick={() => edit('add')}>Выбрать игру</button></div>
+  {/if}
+{:else}
   <ul class="list">
     {#each games as game (game.id)}
-      <li class="row">
-        <span class="cover">{game.name.slice(0, 2).toUpperCase()}</span>
+      <li class="row game-row">
+        <span class="cover" aria-hidden="true">{game.name.slice(0, 2).toUpperCase()}</span>
         <div class="grow">
-          <div>{game.name}</div>
-          {#if editingPathFor === game.id}
-            <div class="inline-form">
-              <input bind:value={pathDraft} placeholder="Папка с сохранениями" />
-              <button class="primary" onclick={() => savePath(game)} disabled={!pathDraft.trim()}>
-                Сохранить
-              </button>
-              <button onclick={() => (editingPathFor = null)}>Отмена</button>
-            </div>
-          {:else}
-            <div class="muted path">{game.savePath ?? 'папка сохранений не найдена'}</div>
+          <div class="game-title"><strong>{game.name}</strong><span class="badge {statusLabel[game.status].tone}">{statusLabel[game.status].text}</span></div>
+          <div class="muted game-path">Запуск: {game.exePath || 'не указан'}</div>
+          <div class="muted game-path">Сохранения: {game.savePath || 'не указаны'}</div>
+          {#if game.status === 'missing'}
+            <div class="problem">{game.exeMissing && game.savePathMissing ? 'На этом ПК не найдены файл игры и папка сохранений.' : game.exeMissing ? 'На этом ПК не найден файл запуска игры.' : 'На этом ПК не найдена папка сохранений.'}</div>
           {/if}
+          {#if game.pathScope === 'local'}<div class="muted">Пути заданы только для этого ПК</div>{/if}
+          {#if !game.processStateKnown}<div class="muted">Состояние запуска игры ещё не проверено</div>{/if}
+          {#if game.status === 'running'}<div class="muted">Закройте игру, чтобы изменить её настройки.</div>{/if}
         </div>
-        {#if game.status === 'missing' && editingPathFor !== game.id}
-          <button
-            onclick={() => {
-              editingPathFor = game.id
-              pathDraft = ''
-            }}>Указать путь</button
-          >
-        {/if}
-        <span class="badge {statusLabel[game.status].tone}">{statusLabel[game.status].text}</span>
+        <div class="game-actions">
+          <button disabled={!!editor || game.status === 'running'} onclick={() => edit('edit', game)}>Настроить</button>
+          <button disabled={!!editor || game.status === 'running'} onclick={() => edit('resolve', game)}>{game.status === 'ignored' ? 'Подключить на этом ПК' : 'Пути на этом ПК'}</button>
+        </div>
       </li>
-    {:else}
-      <li class="row muted">Пока ни одной игры.</li>
     {/each}
   </ul>
+{/if}
 
-  <h3>Добавить игру вручную</h3>
-  <!-- TODO: выбор папки через диалог (tauri-plugin-dialog) вместо ввода пути руками -->
-  <form class="inline-form" onsubmit={addGame}>
-    <input bind:value={newName} placeholder="Название" />
-    <input class="grow" bind:value={newPath} placeholder="Папка с сохранениями" />
-    <button class="primary" disabled={!newName.trim() || !newPath.trim()}>Добавить</button>
-  </form>
-</Loadable>
-
-<DevNote file="src/api/games.rs" commands={['list_games', 'add_game', 'update_game']} />
+<style>
+  .games-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+  .setup-note { padding: 10px 12px; border-radius: 6px; background: var(--accent-soft); font-size: 13px; }
+  .success-note { color: var(--ok); }
+  .empty-games { padding: 24px; text-align: center; }
+  .empty-games h3 { margin: 0 0 8px; }
+  .load-error { padding: 16px; }
+  .game-title { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; align-items: center; }
+  .game-path { overflow-wrap: anywhere; }
+  .problem { color: var(--warn); font-size: 13px; margin-top: 4px; }
+  .game-actions { display: flex; flex-direction: column; gap: 6px; }
+  .game-row { align-items: start; padding: 16px; }
+  @media (max-width: 650px) {
+    .game-row { flex-wrap: wrap; }
+    .game-row .grow { min-width: 200px; }
+    .game-actions { width: 100%; flex-direction: row; flex-wrap: wrap; }
+  }
+</style>

@@ -12,6 +12,7 @@ use crate::services::{game::GameService, profile::ProfileService, settings::Sett
 pub fn start() {
     // TODO: прочитать конфигурацию, создать хранилища и сервисы, запустить RepoWorker (см. app/mod.rs)
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_autostart::Builder::new()
@@ -24,6 +25,9 @@ pub fn start() {
             api::games::get_game_status,
             api::games::add_game,
             api::games::update_game,
+            api::games::resolve_game_paths,
+            api::games::validate_game_paths,
+            api::games::suggest_save_dirs,
             api::profiles::list_profiles,
             api::profiles::current_profile,
             api::profiles::switch_profile,
@@ -115,6 +119,7 @@ pub fn start() {
             ));
             app.manage(game_service);
             app.manage(profile_service);
+            app.manage(settings);
             app.manage(catalog);
             app.manage(runtime);
             tray::setup(app.handle())?;
