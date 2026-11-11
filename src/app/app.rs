@@ -243,12 +243,6 @@ pub fn start() {
             app.manage(runtime.clone());
             tray::setup(app.handle())?;
             app.manage(crate::app::updates::Updates::load(app.handle())?);
-            app.manage(crate::app::launch::LaunchReady);
-            if !std::env::args().any(|arg| arg == "--autostart" || arg == "--launch-game") {
-                if let Some(window) = app.get_webview_window("main") {
-                    window.show()?;
-                }
-            }
             crate::background::processes::spawn(app.handle().clone());
             let mut sync_changes = runtime.subscribe_sync_status();
             let app_handle = app.handle().clone();
@@ -270,6 +264,17 @@ pub fn start() {
                 app.handle().clone(),
                 game_service,
             ));
+            // Hidden webviews also run frontend IPC. Create both windows only after
+            // every command dependency is managed, including the background workers.
+            for window_config in &app.config().app.windows {
+                tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?.build()?;
+            }
+            app.manage(crate::app::launch::LaunchReady);
+            if !std::env::args().any(|arg| arg == "--autostart" || arg == "--launch-game") {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.show()?;
+                }
+            }
             let args: Vec<String> = std::env::args().collect();
             if args.iter().any(|arg| arg == "--launch-game") {
                 crate::app::launch::handle_arguments(app.handle().clone(), args);

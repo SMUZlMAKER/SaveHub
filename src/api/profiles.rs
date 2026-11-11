@@ -77,23 +77,10 @@ pub async fn list_profiles(
 /// Переключить сохранения всех игр на профиль. Операция долгая, поэтому `async` — не блокирует окно.
 /// После успеха — событие `events::PROFILE_CHANGED` и обновить меню трея.
 #[tauri::command]
-pub async fn switch_profile(
-    app: tauri::AppHandle,
-    profile_id: ProfileId,
-    workflow: State<'_, Arc<crate::workflows::SwitchProfile>>,
-) -> ApiResult<()> {
-    let workflow = workflow.inner().clone();
-    let result = tauri::async_runtime::spawn_blocking(move || workflow.execute(&profile_id))
+pub async fn switch_profile(app: tauri::AppHandle, profile_id: ProfileId) -> ApiResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::app::actions::switch_profile(&app, profile_id))
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    for event in [
-        PROFILE_CHANGED,
-        crate::api::events::SAVES_CHANGED,
-        crate::api::events::CONFLICTS_CHANGED,
-    ] {
-        let _ = app.emit(event, ());
-    }
-    result.map_err(Into::into)
+        .map_err(|error| ApiError::Internal(error.to_string()))?
 }
 
 #[tauri::command]

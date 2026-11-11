@@ -1,85 +1,83 @@
-//! Иконка и меню в трее.
-//!
-//! Состав меню взят из макета интерфейса: активный профиль и переключение профилей,
-//! синхронизация, переход к сохранениям и настройкам, статус синхронизации, выход.
-//! Меню нативное (Win32), поэтому оно не стилизуется: только текст, галочки и разделители.
-
-use std::sync::Mutex;
+//! Нативное меню трея, данные из общих хранилищ; действия общие с API окна.
+use crate::{
+    api::{ApiError, events},
+    domain::{Catalog, ProfileId, RuntimeState, SyncState},
+};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-
-use crate::api::events::NAVIGATE;
 use tauri::{
     AppHandle, Emitter, Listener, Manager, Wry,
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 pub const MAIN_WINDOW: &str = "main";
-
 const TRAY_ID: &str = "main";
-const ID_SYNC: &str = "sync";
-const ID_SAVES: &str = "saves";
-const ID_SETTINGS: &str = "settings";
-const ID_QUIT: &str = "quit";
 const PROFILE_PREFIX: &str = "profile:";
 
-/// Как часто обновлять строку «Синхронизировано N мин назад».
-const STATUS_REFRESH: Duration = Duration::from_secs(30);
-
-/// Всё, что нужно меню, чтобы себя нарисовать.
-pub struct TrayView {
-    pub profiles: Vec<(crate::domain::ProfileId, String)>,
-    pub active_profile: Option<crate::domain::ProfileId>,
-    /// Игра, которая сейчас запущена: пока она идет, профили переключать нельзя.
-    pub running_game: Option<String>,
+#[derive(Clone, PartialEq, Eq)]
+struct TrayView {
+    profiles: Vec<(ProfileId, String)>,
+    active: Option<ProfileId>,
+    blocker: Option<&'static str>,
+    sync_enabled: bool,
+    sync_label: &'static str,
+    sync_status: String,
 }
+struct TrayState(Mutex<Option<TrayView>>);
 
-impl TrayView {
-    fn load(app: &AppHandle) -> Self {
-        let catalog = app.state::<std::sync::Arc<crate::domain::Catalog>>();
-        let runtime = app.state::<std::sync::Arc<crate::domain::RuntimeState>>();
-        let mut profiles: Vec<_> = catalog
-            .profiles()
-            .into_values()
-            .map(|p| (p.id, p.name))
-            .collect();
-        profiles.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-        let running_game = match runtime.running_games() {
-            None => Some("состояние процессов неизвестно".into()),
-            Some(games) if !games.is_empty() => Some(
-                games
-                    .iter()
-                    .map(|id| {
-                        catalog
-                            .games()
-                            .get(id)
-                            .map(|g| g.name.clone())
-                            .unwrap_or_else(|| id.to_string())
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
+fn view(app: &AppHandle) -> TrayView {
+    let runtime = app.state::<Arc<RuntimeState>>();
+    let (active, running) = runtime.profile_and_running_games();
+    let mut profiles: Vec<_> = app
+        .state::<Arc<Catalog>>()
+        .profiles()
+        .into_values()
+        .map(|p| (p.id, p.name))
+        .collect();
+    profiles.sort_by_key(|(id, name)| (name.to_lowercase(), *id));
+    let status = runtime.sync_status();
+    let (sync_enabled, sync_label, sync_text) = match status.state {
+        SyncState::NotConfigured => (
+            false,
+            "Сначала настройте репозиторий",
+            "○ Репозиторий не настроен".into(),
+        ),
+        SyncState::Syncing => (false, "Синхронизация…", "↻ Синхронизация…".into()),
+        SyncState::Error => (
+            true,
+            "Повторить синхронизацию",
+            "○ Ошибка синхронизации".into(),
+        ),
+        SyncState::Idle => (
+            true,
+            "Синхронизировать",
+            sync_status(
+                status
+                    .last_sync_at
+                    .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
+                SystemTime::now(),
             ),
-            _ => None,
-        };
-        Self {
-            profiles,
-            active_profile: runtime.active_profile(),
-            running_game,
-        }
+        ),
+    };
+    TrayView {
+        profiles,
+        active,
+        blocker: super::actions::profile_switch_blocker(
+            crate::api::features::get_app_features().profile_switch,
+            running.as_deref(),
+        ),
+        sync_enabled,
+        sync_label,
+        sync_status: sync_text,
     }
 }
 
-struct TrayState {
-    /// Строка статуса синхронизации: ее текст обновляем по таймеру, не пересобирая меню.
-    status_item: Mutex<Option<MenuItem<Wry>>>,
-}
-
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    app.manage(TrayState {
-        status_item: Mutex::new(None),
-    });
-
-    let menu = build_menu(app)?;
+    let initial = view(app);
+    app.manage(TrayState(Mutex::new(Some(initial.clone()))));
+    let menu = build_menu(app, &initial)?;
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("SaveHub")
         .menu(&menu)
@@ -99,17 +97,21 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         tray = tray.icon(icon.clone());
     }
     tray.build(app)?;
-
     for event in [
-        crate::api::events::PROFILE_CHANGED,
-        crate::api::events::GAMES_CHANGED,
+        events::PROFILE_CHANGED,
+        events::GAME_PROCESS_CHANGED,
+        events::GAMES_CHANGED,
     ] {
         let handle = app.clone();
-        app.listen(event, move |_| {
-            refresh_menu(&handle);
-        });
+        app.listen(event, move |_| refresh_sync_status(&handle));
     }
-    spawn_status_refresher(app.clone());
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(30));
+            refresh_sync_status(&handle);
+        }
+    });
     Ok(())
 }
 
@@ -120,75 +122,50 @@ pub fn show_main_window(app: &AppHandle) {
         let _ = window.set_focus();
     }
 }
-
-fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
-    let state = app.state::<TrayState>();
-    let view = TrayView::load(app);
+fn build_menu(app: &AppHandle, view: &TrayView) -> tauri::Result<Menu<Wry>> {
     let menu = Menu::new(app)?;
-
-    let header = match &view.active_profile {
-        Some(profile) => format!(
-            "Активный профиль: {}",
-            view.profiles
-                .iter()
-                .find(|(id, _)| id == profile)
-                .map(|(_, name)| name.as_str())
-                .unwrap_or("не найден")
-        ),
-        None => "Профили — в окне приложения".to_owned(),
-    };
+    let active = view
+        .profiles
+        .iter()
+        .find(|(id, _)| Some(*id) == view.active);
+    let header = active
+        .map(|(_, name)| format!("Активный профиль: {name}"))
+        .unwrap_or_else(|| "Активный профиль не выбран".into());
     menu.append(&MenuItem::new(app, header, false, None::<&str>)?)?;
-
-    let can_switch = view.running_game.is_none();
-    for (profile_id, profile) in &view.profiles {
-        let is_active = view.active_profile == Some(*profile_id);
-        let id = format!("{PROFILE_PREFIX}{profile_id}");
+    for (id, name) in &view.profiles {
+        let active = view.active == Some(*id);
         menu.append(&CheckMenuItem::with_id(
             app,
-            id,
-            profile,
-            can_switch,
-            is_active,
+            format!("{PROFILE_PREFIX}{id}"),
+            name,
+            view.blocker.is_none() && !active,
+            active,
             None::<&str>,
         )?)?;
     }
-    if let Some(game) = &view.running_game {
-        let text = format!("Запущена {game}: переключение недоступно");
-        menu.append(&MenuItem::new(app, text, false, None::<&str>)?)?;
+    if let Some(reason) = view.blocker {
+        menu.append(&MenuItem::new(app, reason, false, None::<&str>)?)?;
     }
-
-    menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(
         app,
-        ID_SYNC,
-        "Синхронизация пока недоступна",
-        false,
-        None::<&str>,
-    )?)?;
-    menu.append(&MenuItem::with_id(
-        app,
-        ID_SAVES,
-        "Сохранения и откат…",
+        "profiles",
+        "Управление профилями…",
         true,
         None::<&str>,
     )?)?;
-    menu.append(&MenuItem::with_id(
-        app,
-        ID_SETTINGS,
-        "Настройки…",
-        true,
-        None::<&str>,
-    )?)?;
-
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    let status = MenuItem::new(app, current_sync_status(app), false, None::<&str>)?;
-    menu.append(&status)?;
-    *state.status_item.lock().unwrap() = Some(status);
-
+    for (id, label, enabled) in [
+        ("sync", view.sync_label, view.sync_enabled),
+        ("saves", "Сохранения и откат…", true),
+        ("settings", "Настройки…", true),
+    ] {
+        menu.append(&MenuItem::with_id(app, id, label, enabled, None::<&str>)?)?;
+    }
+    menu.append(&MenuItem::new(app, &view.sync_status, false, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(
         app,
-        ID_QUIT,
+        "quit",
         "Выход",
         true,
         None::<&str>,
@@ -198,102 +175,104 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     match event.id.as_ref() {
-        ID_SYNC => sync_now(app),
-        ID_SAVES => open_screen(app, "saves"),
-        ID_SETTINGS => open_screen(app, "settings"),
-        ID_QUIT => app.exit(0),
+        "sync" => sync_from_tray(app),
+        "profiles" => open_screen(app, "profiles"),
+        "saves" => open_screen(app, "saves"),
+        "settings" => open_screen(app, "settings"),
+        "quit" => app.exit(0),
         id => {
-            if let Some(profile) = id.strip_prefix(PROFILE_PREFIX) {
-                switch_profile(app, profile);
+            if let Some(id) = id.strip_prefix(PROFILE_PREFIX) {
+                let id = id.to_owned();
+                run_action(app, move |app| {
+                    let id = id.parse().map_err(|_| {
+                        ApiError::Rejected(
+                            "Профиль больше недоступен. Откройте список профилей заново.".into(),
+                        )
+                    })?;
+                    super::actions::switch_profile(&app, id)
+                });
             }
         }
     }
 }
-
-fn switch_profile(app: &AppHandle, profile: &str) {
-    let Ok(profile) = profile.parse() else {
-        return;
-    };
-    let workflow = app
-        .state::<std::sync::Arc<crate::workflows::SwitchProfile>>()
-        .inner()
-        .clone();
+// Подписываемся до запроса: ошибка фоновой операции не должна потеряться после
+// успешной постановки в очередь. Автоматические проверки не создают диалогов.
+fn sync_from_tray(app: &AppHandle) {
+    let mut changes = app.state::<Arc<RuntimeState>>().subscribe_sync_status();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = super::actions::sync_now(&app) {
+            show_error(&app, error);
+            return;
+        }
+        while changes.changed().await.is_ok() {
+            match app.state::<Arc<RuntimeState>>().sync_status().state {
+                SyncState::Error => {
+                    show_error(&app, ApiError::Rejected("Не удалось синхронизировать репозиторий. Проверьте подключение к сети и настройки доступа к GitHub.".into()));
+                    break;
+                }
+                SyncState::Idle | SyncState::NotConfigured => break,
+                SyncState::Syncing => {}
+            }
+        }
+        refresh_sync_status(&app);
+    });
+}
+fn run_action(
+    app: &AppHandle,
+    action: impl FnOnce(AppHandle) -> Result<(), ApiError> + Send + 'static,
+) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let result = workflow.execute(&profile);
-        for event in [
-            crate::api::events::PROFILE_CHANGED,
-            crate::api::events::SAVES_CHANGED,
-            crate::api::events::CONFLICTS_CHANGED,
-        ] {
-            let _ = app.emit(event, ());
+        if let Err(error) = action(app.clone()) {
+            show_error(&app, error);
         }
-        if let Err(error) = result {
-            use tauri_plugin_dialog::DialogExt;
-            let error = crate::api::ApiError::from(error);
-            let message = match error {
-                crate::api::ApiError::Rejected(m) | crate::api::ApiError::Internal(m) => m,
-                _ => "Переключение недоступно".into(),
-            };
-            app.dialog().message(message).title("SaveHub").show(|_| {});
-        }
+        refresh_sync_status(&app);
     });
 }
-
-fn refresh_menu(app: &AppHandle) {
-    let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let (Some(tray), Ok(menu)) = (handle.tray_by_id(TRAY_ID), build_menu(&handle)) {
-            let _ = tray.set_menu(Some(menu));
+fn show_error(app: &AppHandle, error: ApiError) {
+    let message: String = match error {
+        ApiError::NotImplemented(_) => {
+            "Эта функция пока недоступна в установленной версии SaveHub.".into()
         }
-    });
+        ApiError::Rejected(message) => message,
+        ApiError::Internal(_) => {
+            "Не удалось выполнить действие из-за внутренней ошибки. Попробуйте ещё раз.".into()
+        }
+    };
+    app.dialog()
+        .message(message)
+        .title("SaveHub — действие не выполнено")
+        .kind(MessageDialogKind::Error)
+        .show(|_| {});
 }
-
-fn sync_now(app: &AppHandle) {
-    if let Err(error) = app
-        .state::<crate::background::repo::RepoWorkerHandle>()
-        .sync_now()
-    {
-        eprintln!("Не удалось запустить синхронизацию: {error:?}");
-    }
-}
-
 fn open_screen(app: &AppHandle, screen: &str) {
     show_main_window(app);
-    let _ = app.emit_to(MAIN_WINDOW, NAVIGATE, screen);
+    if let Err(error) = app.emit_to(MAIN_WINDOW, events::NAVIGATE, screen) {
+        show_error(app, ApiError::Internal(error.to_string()));
+    }
 }
 
+// Все операции с меню — на UI-потоке. Mutex никогда не удерживается при обращении к UI.
 pub fn refresh_sync_status(app: &AppHandle) {
-    let state = app.state::<TrayState>();
-    let item = state.status_item.lock().unwrap().clone();
-    if let Some(item) = item {
-        let _ = item.set_text(current_sync_status(app));
-    }
-}
-
-fn current_sync_status(app: &AppHandle) -> String {
-    use crate::domain::{RuntimeState, SyncState};
-    let status = app.state::<std::sync::Arc<RuntimeState>>().sync_status();
-    match status.state {
-        SyncState::NotConfigured => "○ Репозиторий не настроен".into(),
-        SyncState::Syncing => "↻ Синхронизация…".into(),
-        SyncState::Error => "○ Ошибка синхронизации".into(),
-        SyncState::Idle => sync_status(
-            status
-                .last_sync_at
-                .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
-            SystemTime::now(),
-        ),
-    }
-}
-
-fn spawn_status_refresher(app: AppHandle) {
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(STATUS_REFRESH);
-            refresh_sync_status(&app);
+    let handle = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        let next = view(&handle);
+        let state = handle.state::<TrayState>();
+        if state.0.lock().unwrap().as_ref() == Some(&next) {
+            return;
         }
-    });
+        let result = build_menu(&handle, &next).and_then(|menu| match handle.tray_by_id(TRAY_ID) {
+            Some(tray) => tray.set_menu(Some(menu)),
+            None => Ok(()),
+        });
+        match result {
+            Ok(()) => *state.0.lock().unwrap() = Some(next),
+            Err(error) => show_error(&handle, ApiError::Internal(error.to_string())),
+        }
+    }) {
+        show_error(app, ApiError::Internal(error.to_string()));
+    }
 }
 
 fn sync_status(last_sync: Option<SystemTime>, now: SystemTime) -> String {
