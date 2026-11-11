@@ -130,7 +130,29 @@ impl SyncRepository {
             outcome.checkpoint = Some(result);
         }
 
-        if (request.push || matches!(outcome.checkpoint, Some(Ok(true)))) && self.has_pending_push()
+        // SwitchProfile and conflict resolution can commit outside this worker.
+        // Rebuild discovery from Git refs instead of relying on the old active UUID
+        // or the in-memory retry queue, which disappears on application restart.
+        if request.push || request.checkpoint {
+            match self.repo.unpushed_profiles() {
+                Ok(profiles) => {
+                    // Authoritative refs also remove profiles deleted or published
+                    // outside the worker since an earlier failed push.
+                    self.pending_push = profiles.into_iter().collect();
+                    if self.pending_push.is_empty() {
+                        self.push_error = None;
+                    }
+                }
+                Err(error) => {
+                    self.push_error = Some(format!("{error:?}"));
+                    outcome.push = Some(Err(error));
+                }
+            }
+        }
+
+        if outcome.push.is_none()
+            && (request.push || matches!(outcome.checkpoint, Some(Ok(true))))
+            && self.has_pending_push()
         {
             let result = self.push_pending_profiles();
             self.push_error = error_message(&result);
@@ -234,4 +256,88 @@ impl SyncRepository {
 
 fn error_message<T>(result: &ServiceResult<T>) -> Option<String> {
     result.as_ref().err().map(|error| format!("{error:?}"))
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    use crate::{adapters::git, domain::*, services::repo::RepoService};
+    use std::collections::HashMap;
+
+    #[test]
+    fn discovers_inactive_local_refs_without_creating_remote_only_worktrees() {
+        let root = std::env::temp_dir().join(format!("savehub-discover-{}", uuid::Uuid::new_v4()));
+        let repository = git2::Repository::init(&root).unwrap();
+        let base = git::commit_files(&root, None, &[], "base").unwrap();
+        let changed = git::commit_files(&root, Some(&base), &[("save", b"new")], "save").unwrap();
+        git::create_branch(&root, "a", &changed).unwrap();
+        git::create_branch(&root, "b", &base).unwrap();
+        for name in ["a", "b", "remote-only"] {
+            repository
+                .reference(
+                    &format!("refs/remotes/origin/{name}"),
+                    git2::Oid::from_str(&base).unwrap(),
+                    false,
+                    "fixture",
+                )
+                .unwrap();
+        }
+        let a = uuid::Uuid::from_u128(1);
+        let b = uuid::Uuid::from_u128(2);
+        let c = uuid::Uuid::from_u128(3);
+        let catalog = Arc::new(Catalog::new(
+            HashMap::new(),
+            [(a, "a"), (b, "b"), (c, "remote-only")]
+                .into_iter()
+                .map(|(id, branch)| {
+                    (
+                        id,
+                        Profile {
+                            id,
+                            name: branch.into(),
+                            branch: branch.into(),
+                            last_played_game: None,
+                        },
+                    )
+                })
+                .collect(),
+        ));
+        let runtime = Arc::new(RuntimeState::new(
+            Some(b),
+            vec![],
+            SyncStatus {
+                state: SyncState::Idle,
+                last_sync_at: None,
+                error: None,
+            },
+        ));
+        let settings = Arc::new(Settings::new(
+            SettingsData {
+                catalog_repo_url: None,
+                repo_url: Some("https://github.com/test/saves".into()),
+                local_repo_path: Some(root.clone()),
+                sync_after_session: true,
+                sync_while_gaming: false,
+                auto_switch_profile: false,
+                ask_profile_before_launch: true,
+                start_minimized: false,
+            },
+            LocalConfig {
+                machine_id: "test".into(),
+                games: HashMap::new(),
+            },
+        ));
+        let service = RepoService::new(catalog.clone(), runtime.clone(), settings.clone());
+        assert_eq!(service.unpushed_profiles().unwrap(), vec![a]);
+        let restarted = RepoService::new(catalog, runtime, settings);
+        assert_eq!(restarted.unpushed_profiles().unwrap(), vec![a]);
+        assert!(!root.join(".git/savehub/trees").exists());
+        assert!(
+            repository
+                .find_branch("remote-only", git2::BranchType::Local)
+                .is_err()
+        );
+        drop(repository);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

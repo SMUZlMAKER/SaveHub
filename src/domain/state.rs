@@ -96,6 +96,7 @@ pub struct RuntimeState {
 struct RuntimeStateInner {
     active_profile: Option<ProfileId>,
     running_games: Option<Vec<GameId>>,
+    pending_sessions: Vec<(GameId, ProfileId)>,
     conflicts: Vec<Conflict>,
     sync_status: SyncStatus,
 }
@@ -128,6 +129,11 @@ impl RuntimeStateInner {
         for game in previous {
             if !unique.contains(game) {
                 events.push(GameProcessEvent::Stopped(*game));
+                if let Some(profile) = self.active_profile {
+                    if !self.pending_sessions.contains(&(*game, profile)) {
+                        self.pending_sessions.push((*game, profile));
+                    }
+                }
             }
         }
         for game in &unique {
@@ -169,6 +175,7 @@ impl RuntimeState {
             inner: RwLock::new(RuntimeStateInner {
                 active_profile,
                 running_games: None,
+                pending_sessions: Vec::new(),
                 conflicts,
                 sync_status,
             }),
@@ -208,6 +215,23 @@ impl RuntimeState {
     pub fn set_running_games(&self, running_games: Vec<GameId>) -> Vec<GameProcessEvent> {
         let mut inner = self.inner.write().expect("RuntimeState lock poisoned");
         inner.set_running_games(running_games)
+    }
+
+    /// Stop transitions remain pending even when a foreground process check observed them.
+    pub fn pending_sessions(&self) -> Vec<(GameId, ProfileId)> {
+        self.inner
+            .read()
+            .expect("RuntimeState lock poisoned")
+            .pending_sessions
+            .clone()
+    }
+
+    pub fn acknowledge_session(&self, game: GameId, profile: ProfileId) {
+        self.inner
+            .write()
+            .expect("RuntimeState lock poisoned")
+            .pending_sessions
+            .retain(|item| *item != (game, profile));
     }
 
     pub fn conflicts(&self) -> Vec<Conflict> {
@@ -455,5 +479,20 @@ mod tests {
             Err(ProfileActivationError::ProcessesUnknown)
         );
         assert_eq!(runtime.active_profile(), Some(next_profile));
+    }
+    #[test]
+    fn foreground_process_checks_do_not_consume_pending_session_snapshots() {
+        let runtime = runtime();
+        let profile = runtime.active_profile().unwrap();
+        let game = uuid::Uuid::new_v4();
+        runtime.set_running_games(vec![game]);
+        assert_eq!(runtime.set_running_games(vec![]).len(), 1);
+        assert!(runtime.set_running_games(vec![]).is_empty());
+        runtime
+            .set_active_profile(Some(uuid::Uuid::new_v4()))
+            .unwrap();
+        assert_eq!(runtime.pending_sessions(), vec![(game, profile)]);
+        runtime.acknowledge_session(game, profile);
+        assert!(runtime.pending_sessions().is_empty());
     }
 }

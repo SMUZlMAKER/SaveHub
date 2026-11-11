@@ -34,6 +34,8 @@ struct FakeRepo {
     checkpoint_block: Mutex<Option<CheckpointBlock>>,
     fetch_delay: Mutex<Duration>,
     fetch_finished: Mutex<Option<Instant>>,
+    unpublished_profiles: Mutex<std::collections::BTreeSet<ProfileId>>,
+    fail_discovery: AtomicBool,
 }
 
 struct CheckpointBlock {
@@ -72,6 +74,19 @@ impl FakeRepo {
 }
 
 impl RepoOperations for FakeRepo {
+    fn unpushed_profiles(&self) -> ServiceResult<Vec<ProfileId>> {
+        if self.fail_discovery.load(Ordering::SeqCst) {
+            return Err(ServiceError::Conflict("cannot inspect profile refs".into()));
+        }
+        Ok(self
+            .unpublished_profiles
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .collect())
+    }
+
     fn configuration(&self) -> Option<RepositoryConfig> {
         (!self.unconfigured.load(Ordering::SeqCst)).then(|| RepositoryConfig {
             url: format!("repo-{}", self.repository.load(Ordering::SeqCst)),
@@ -90,10 +105,11 @@ impl RepoOperations for FakeRepo {
             format!("checkpoint:{}", profile_name(profile)),
             self.fail_checkpoint.load(Ordering::SeqCst),
         )?;
-        Ok(self
-            .creates_commit
-            .load(Ordering::SeqCst)
-            .then(|| "commit".into()))
+        let created = self.creates_commit.load(Ordering::SeqCst);
+        if created || !self.clean.load(Ordering::SeqCst) {
+            self.unpublished_profiles.lock().unwrap().insert(*profile);
+        }
+        Ok(created.then(|| "commit".into()))
     }
 
     fn has_unpushed_commits(&self, _profile: &ProfileId) -> ServiceResult<bool> {
@@ -104,7 +120,9 @@ impl RepoOperations for FakeRepo {
         self.record(
             format!("push:{}", profile_name(profile)),
             self.fail_push.load(Ordering::SeqCst),
-        )
+        )?;
+        self.unpublished_profiles.lock().unwrap().remove(profile);
+        Ok(())
     }
 
     fn fetch(&self) -> ServiceResult<()> {
@@ -692,6 +710,8 @@ fn changing_repository_does_not_send_pending_profiles_to_new_remote() {
     repo.take_calls();
 
     repo.repository.store(1, Ordering::SeqCst);
+    // Model the refs of the newly configured clean repository, not the old clone.
+    repo.unpublished_profiles.lock().unwrap().clear();
     repo.clean.store(true, Ordering::SeqCst);
     repo.fail_push.store(false, Ordering::SeqCst);
     let now = Instant::now();
@@ -954,4 +974,87 @@ fn dropping_pause_guard_does_not_revive_stopped_worker() {
     assert!(handle.wake().is_err());
     assert!(handle.sync_now().is_err());
     assert!(handle.pause_after_flush().is_err());
+}
+
+#[test]
+fn restart_with_another_active_profile_publishes_departing_checkpoint() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.clean.store(true, Ordering::SeqCst);
+    // A workflow committed A and persisted B as active before this worker started.
+    repo.unpublished_profiles.lock().unwrap().insert(PROFILE_A);
+    let (mut worker, runtime, _) = engine(repo.clone());
+    runtime.set_active_profile(Some(PROFILE_B)).unwrap();
+    worker.tick(Instant::now(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:b", "push:a", "fetch"]);
+    assert!(!worker.sync.has_pending_push());
+}
+
+#[test]
+fn flush_discovers_checkpoint_made_by_switch_between_worker_ticks() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.clean.store(true, Ordering::SeqCst);
+    let (mut worker, runtime, _) = engine(repo.clone());
+    worker.tick(Instant::now(), false).unwrap();
+    repo.take_calls();
+    repo.unpublished_profiles.lock().unwrap().insert(PROFILE_A);
+    runtime.set_active_profile(Some(PROFILE_B)).unwrap();
+    worker.checkpoint_forced = true;
+    worker.scan_due = Instant::now();
+    worker.push_due = Instant::now();
+    worker.tick(Instant::now(), true).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:b", "push:a"]);
+}
+
+#[test]
+fn failed_inactive_push_is_rediscovered_after_restart_without_recheckpointing_it() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.clean.store(true, Ordering::SeqCst);
+    repo.unpublished_profiles.lock().unwrap().insert(PROFILE_A);
+    repo.fail_push.store(true, Ordering::SeqCst);
+    let (mut first, runtime, _) = engine(repo.clone());
+    runtime.set_active_profile(Some(PROFILE_B)).unwrap();
+    assert!(first.tick(Instant::now(), false).is_err());
+    assert_eq!(repo.take_calls(), ["checkpoint:b", "push:a", "fetch"]);
+    drop(first);
+    repo.fail_push.store(false, Ordering::SeqCst);
+    let (mut restarted, runtime, _) = engine(repo.clone());
+    runtime.set_active_profile(Some(PROFILE_B)).unwrap();
+    restarted.tick(Instant::now(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:b", "push:a", "fetch"]);
+}
+
+#[test]
+fn discovery_failure_prevents_false_success_and_retries() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.clean.store(true, Ordering::SeqCst);
+    repo.unpublished_profiles.lock().unwrap().insert(PROFILE_A);
+    repo.fail_discovery.store(true, Ordering::SeqCst);
+    let (mut worker, runtime, _) = engine(repo.clone());
+    runtime.set_active_profile(Some(PROFILE_B)).unwrap();
+    assert!(worker.tick(Instant::now(), false).is_err());
+    assert!(runtime.sync_status().error.is_some());
+    assert_eq!(runtime.sync_status().last_sync_at, None);
+    repo.fail_discovery.store(false, Ordering::SeqCst);
+    repo.take_calls();
+    worker.tick(worker.next_deadline(), false).unwrap();
+    assert!(repo.take_calls().contains(&"push:a".to_owned()));
+}
+
+#[test]
+fn deleted_pending_profile_does_not_leave_a_permanent_retry() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.clean.store(true, Ordering::SeqCst);
+    repo.unpublished_profiles.lock().unwrap().insert(PROFILE_A);
+    repo.fail_push.store(true, Ordering::SeqCst);
+    let (mut worker, runtime, _) = engine(repo.clone());
+    runtime.set_active_profile(Some(PROFILE_B)).unwrap();
+    assert!(worker.tick(Instant::now(), false).is_err());
+    repo.take_calls();
+    // ProfileService archived the inactive A between retry attempts.
+    repo.unpublished_profiles.lock().unwrap().remove(&PROFILE_A);
+    repo.fail_push.store(false, Ordering::SeqCst);
+    worker.tick(worker.next_deadline(), false).unwrap();
+    assert!(repo.take_calls().is_empty());
+    assert!(!worker.sync.has_pending_push());
+    assert!(runtime.sync_status().error.is_none());
 }

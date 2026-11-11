@@ -80,8 +80,8 @@ pub fn trusted_github_url(url: &str) -> bool {
     })
 }
 
-/// Attach an existing branch, or start an independent history. Never replace files.
-pub fn prepare_worktree(root: &Path, branch: &str, key: &str) -> AdapterResult<PathBuf> {
+/// Locate an already materialized tree without creating branches or worktrees.
+pub fn existing_worktree(root: &Path, branch: &str, key: &str) -> AdapterResult<Option<PathBuf>> {
     let repo = Repository::open(root)?;
     let reference = format!("refs/heads/{branch}");
     if !git2::Reference::is_valid_name(&reference) {
@@ -94,7 +94,7 @@ pub fn prepare_worktree(root: &Path, branch: &str, key: &str) -> AdapterResult<P
         .as_deref()
         == Some(&reference)
     {
-        return Ok(root.to_owned());
+        return Ok(Some(root.to_owned()));
     }
     relative(Path::new(key))?;
     let path = repo.commondir().join("savehub/trees").join(key);
@@ -105,8 +105,18 @@ pub fn prepare_worktree(root: &Path, branch: &str, key: &str) -> AdapterResult<P
         {
             return Err(invalid("Unexpected worktree repository or branch"));
         }
+        return Ok(Some(path));
+    }
+    Ok(None)
+}
+
+/// Attach an existing branch, or start an independent history. Never replace files.
+pub fn prepare_worktree(root: &Path, branch: &str, key: &str) -> AdapterResult<PathBuf> {
+    if let Some(path) = existing_worktree(root, branch, key)? {
         return Ok(path);
     }
+    let repo = Repository::open(root)?;
+    let path = repo.commondir().join("savehub/trees").join(key);
     fs::create_dir_all(path.parent().ok_or_else(|| invalid("No worktree parent"))?)?;
     let mut local = match repo.find_branch(branch, BranchType::Local) {
         Ok(branch) => branch,
@@ -728,6 +738,14 @@ pub fn head(repo: &Path) -> AdapterResult<CommitId> {
         .peel_to_commit()?
         .id()
         .to_string())
+}
+
+pub fn will_fast_forward(repo: &Path, revision: &str) -> AdapterResult<bool> {
+    let repository = Repository::open(repo)?;
+    let theirs = repository.revparse_single(revision)?.peel_to_commit()?;
+    let annotated = repository.find_annotated_commit(theirs.id())?;
+    let (analysis, _) = repository.merge_analysis(&[&annotated])?;
+    Ok(!analysis.is_up_to_date() && (analysis.is_fast_forward() || analysis.is_unborn()))
 }
 
 pub fn merge(repo: &Path, revision: &str, fast_forward_only: bool) -> AdapterResult<MergeOutcome> {

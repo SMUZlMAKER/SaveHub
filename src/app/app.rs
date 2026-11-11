@@ -176,11 +176,10 @@ pub fn start() {
                 },
             ));
             let operations = Arc::new(Mutex::new(()));
-            app.manage(Arc::new(SettingsService::new(
-                settings.clone(),
-                settings_path,
-                operations.clone(),
-            )));
+            app.manage(Arc::new(
+                SettingsService::new(settings.clone(), settings_path, operations.clone())
+                    .with_bindings(catalog.clone(), runtime.clone()),
+            ));
             let game_service = Arc::new(
                 GameService::persistent_in(
                     catalog.clone(),
