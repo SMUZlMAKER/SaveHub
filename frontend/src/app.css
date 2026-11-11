@@ -353,3 +353,14 @@ input[type='checkbox'] {
   background: var(--danger);
   color: #fff;
 }
+
+.availability-note {
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+}
+@media (max-width: 600px) {
+  #app { padding: 16px 12px 64px; }
+  header { align-items: flex-start; flex-wrap: wrap; }
+  nav { overflow-x: auto; }
+}

@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, ApiResult, stub};
+use super::{ApiError, ApiResult};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,27 +107,8 @@ pub enum SaveKind {
 /// TODO(backend): SaveService::list.
 #[tauri::command]
 pub fn list_save_history(game_id: Option<String>) -> ApiResult<Vec<SaveHistoryEntryDto>> {
-    let save = |id: &str, game: (&str, &str), kind, minutes, size_mb: u64| SaveHistoryEntryDto {
-        id: id.into(),
-        game_id: game.0.into(),
-        game_name: game.1.into(),
-        profile_name: "Основной".into(),
-        kind,
-        created_at: stub::minutes_ago(minutes),
-        size_bytes: size_mb * 1024 * 1024,
-    };
-    let hk = ("hollow-knight", "Hollow Knight");
-    let sv = ("stardew-valley", "Stardew Valley");
-    let all = vec![
-        save("s4", hk, SaveKind::AfterSession, 25, 3),
-        save("s3", sv, SaveKind::BeforeSwitch, 95, 12),
-        save("s2", sv, SaveKind::AfterSession, 180, 12),
-        save("s1", hk, SaveKind::Conflict, 60 * 26, 3),
-    ];
-    Ok(all
-        .into_iter()
-        .filter(|s| game_id.as_deref().is_none_or(|id| s.game_id == id))
-        .collect())
+    let _ = game_id;
+    Err(ApiError::NotImplemented("list_save_history"))
 }
 
 /// Восстановить выбранное сохранение игры. Перед восстановлением создать сохранение `BeforeRestore`.

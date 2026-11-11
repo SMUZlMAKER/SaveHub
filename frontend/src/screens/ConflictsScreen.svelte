@@ -1,10 +1,12 @@
 <script lang="ts">
+  import type { AppFeatures } from '../lib/types'
+  let { features }: { features: AppFeatures } = $props()
+
   import { onMount } from 'svelte'
   import { api, describeError, events, subscribe } from '../lib/api'
   import { formatAgo, formatSize } from '../lib/format'
   import { notice } from '../lib/notice.svelte'
   import type { Conflict, ConflictResolution, SaveVersion } from '../lib/types'
-  import DevNote from '../lib/components/DevNote.svelte'
   import Loadable from '../lib/components/Loadable.svelte'
 
   type Side = 'local' | 'remote'
@@ -49,6 +51,7 @@
   }
 
   onMount(() => {
+    if (!features.conflicts) return
     load()
     return subscribe(events.conflictsChanged, load)
   })
@@ -70,6 +73,8 @@
 <h2>Конфликты сохранений</h2>
 <p class="muted">Сохранение изменили на двух ПК независимо. Выбери, какую версию оставить.</p>
 
+{#if !features.conflicts}<p class="availability-note">Проверка и разрешение конфликтов пока недоступны в этой версии. Сравнение сохранений между компьютерами ещё не выполняется.</p>{/if}
+{#if features.conflicts}
 <Loadable {loading} error={loadError}>
   {#each conflicts as conflict (conflict.id)}
     <section class="card">
@@ -90,5 +95,4 @@
     <p class="muted">Конфликтов нет.</p>
   {/each}
 </Loadable>
-
-<DevNote file="src/api/sync.rs" commands={['list_conflicts', 'resolve_conflict']} />
+{/if}
