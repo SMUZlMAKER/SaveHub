@@ -146,21 +146,23 @@ impl ProcessService {
                 destination.display()
             )));
         }
-        config::write_games(
-            &registrations.join(format!("{game_id}.json")),
-            &[game.clone()],
-        )
-        .map_err(ServiceError::Adapter)?;
         let savehub = std::env::current_exe()
             .map_err(|e| ServiceError::Adapter(crate::adapters::AdapterError::Io(e)))?;
         let icon = crate::adapters::fs::expand_path(&game.paths.exe_path)
             .map_err(ServiceError::Adapter)?;
-        process::create_shortcut(
-            &destination,
-            &savehub,
-            &["--launch-game".into(), game_id.to_string()],
-            savehub.parent(),
-            &icon,
+        config::publish_game_registration(
+            &registrations.join(format!("{game_id}.json")),
+            &game,
+            || {
+                process::create_shortcut(
+                    &destination,
+                    &savehub,
+                    &["--launch-game".into(), game_id.to_string()],
+                    savehub.parent(),
+                    &icon,
+                )
+            },
+            || process::remove_created_shortcut(&destination),
         )
         .map_err(ServiceError::Adapter)?;
         Ok(destination)

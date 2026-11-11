@@ -216,6 +216,11 @@ pub fn create_shortcut(
     Err(AdapterError::UnsupportedPlatform)
 }
 
+/// Roll back only a shortcut successfully created by this operation.
+pub fn remove_created_shortcut(path: &Path) -> AdapterResult<()> {
+    std::fs::remove_file(path).map_err(AdapterError::Io)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

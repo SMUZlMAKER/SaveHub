@@ -16,6 +16,38 @@ pub fn write_games(path: &Path, games: &[Game]) -> AdapterResult<()> {
     write_json(path, games)
 }
 
+/// Stage launcher metadata first, but make it addressable by game ID only after
+/// publishing the shortcut. A failed publication never replaces an older record.
+pub fn publish_game_registration(
+    path: &Path,
+    game: &Game,
+    publish: impl FnOnce() -> AdapterResult<()>,
+    rollback: impl FnOnce() -> AdapterResult<()>,
+) -> AdapterResult<()> {
+    let staged = temporary_path(path);
+    write_games(&staged, std::slice::from_ref(game))?;
+    let result = match publish() {
+        Err(error) => Err(error),
+        Ok(()) => match atomic_replace(&staged, path) {
+            Ok(()) => Ok(()),
+            Err(error) => match rollback() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(super::AdapterError::InvalidData(format!(
+                    "Не удалось сохранить регистрацию: {error:?}; не удалось удалить созданный ярлык: {cleanup:?}"
+                ))),
+            },
+        },
+    };
+    if staged.exists() {
+        if let Err(cleanup) = fs::remove_file(&staged) {
+            return Err(super::AdapterError::InvalidData(format!(
+                "Результат создания ярлыка: {result:?}; не удалось удалить временную регистрацию: {cleanup}"
+            )));
+        }
+    }
+    result
+}
+
 pub fn read_profiles(path: &Path) -> AdapterResult<Option<Vec<Profile>>> {
     read_json(path)
 }
@@ -152,5 +184,124 @@ mod tests {
 
         assert_eq!(loaded.repo_url, second.repo_url);
         let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::*;
+
+    fn fixture() -> (PathBuf, Game) {
+        let root =
+            std::env::temp_dir().join(format!("savehub-registration-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let game = Game {
+            id: uuid::Uuid::new_v4(),
+            name: "New".into(),
+            paths: GamePaths {
+                exe_path: "game.exe".into(),
+                save_dir_path: "saves".into(),
+            },
+            process_names: vec![],
+        };
+        (root, game)
+    }
+
+    #[test]
+    fn failed_shortcut_preserves_previous_registration_and_removes_staging() {
+        for existing in [false, true] {
+            let (root, game) = fixture();
+            let record = root.join(format!("{}.json", game.id));
+            let old = b"previous registration bytes";
+            if existing {
+                fs::write(&record, old).unwrap();
+            }
+            let result = publish_game_registration(
+                &record,
+                &game,
+                || {
+                    if existing {
+                        assert_eq!(fs::read(&record).unwrap(), old);
+                    } else {
+                        assert!(!record.exists());
+                    }
+                    Err(super::super::AdapterError::InvalidData(
+                        "PowerShell / hard_link failed".into(),
+                    ))
+                },
+                || panic!("Must not remove a shortcut which was never published"),
+            );
+            assert!(result.is_err());
+            if existing {
+                assert_eq!(fs::read(&record).unwrap(), old);
+            } else {
+                assert!(!record.exists());
+            }
+            assert_eq!(fs::read_dir(&root).unwrap().count(), usize::from(existing));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn commits_registration_only_after_shortcut_publication() {
+        let (root, game) = fixture();
+        let record = root.join(format!("{}.json", game.id));
+        let link = root.join("game.lnk");
+        publish_game_registration(
+            &record,
+            &game,
+            || {
+                assert!(!record.exists());
+                fs::write(&link, b"published shortcut").map_err(super::super::AdapterError::Io)
+            },
+            || panic!("Successful publication needs no rollback"),
+        )
+        .unwrap();
+        assert_eq!(read_games(&record).unwrap().unwrap()[0].id, game.id);
+        assert!(link.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_failure_is_reported_and_staging_is_still_removed() {
+        let (root, game) = fixture();
+        let record = root.join("directory.json");
+        fs::create_dir(&record).unwrap();
+        let link = root.join("game.lnk");
+        let result = publish_game_registration(
+            &record,
+            &game,
+            || fs::write(&link, b"published shortcut").map_err(super::super::AdapterError::Io),
+            || {
+                Err(super::super::AdapterError::InvalidData(
+                    "shortcut is locked".into(),
+                ))
+            },
+        );
+        let error = format!("{:?}", result.unwrap_err());
+        assert!(error.contains("shortcut is locked"));
+        assert!(record.is_dir());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_metadata_commit_removes_published_shortcut_and_staging() {
+        let (root, game) = fixture();
+        let record = root.join("directory-cannot-be-replaced.json");
+        fs::create_dir(&record).unwrap();
+        let link = root.join("game.lnk");
+        let result = publish_game_registration(
+            &record,
+            &game,
+            || fs::write(&link, b"published shortcut").map_err(super::super::AdapterError::Io),
+            || fs::remove_file(&link).map_err(super::super::AdapterError::Io),
+        );
+        assert!(result.is_err());
+        assert!(!link.exists());
+        assert!(record.is_dir());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 }

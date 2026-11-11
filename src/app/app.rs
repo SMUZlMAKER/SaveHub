@@ -168,9 +168,7 @@ pub fn start() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api: close, .. } = event {
                 close.prevent_close();
-                if window.label() == "launch" {
-                    let _ = crate::app::launch::cancel(window.app_handle(), None);
-                }
+                let _ = crate::app::launch::cancel(window.app_handle(), None);
                 let _ = window.hide();
             }
         })
