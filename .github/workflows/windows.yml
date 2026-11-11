@@ -107,8 +107,8 @@ jobs:
         run: npm run build
       - name: Run Rust unit and documentation tests
         run: cargo test --release --locked
-      - name: Test updater configuration generation
-        run: node --test .github/scripts/prepare-updater.test.mjs
+      - name: Test release and updater scripts
+        run: node --test .github/scripts/prepare-updater.test.mjs .github/scripts/publish-release.test.mjs
       # Signing secrets are available only to a manual stable release from main.
       # PR and branch code never receives the private key.
       - name: Build signed stable installer
@@ -173,12 +173,19 @@ jobs:
             const fs = require('node:fs/promises');
             const crypto = require('node:crypto');
             const prerelease = process.env.PRERELEASE === 'true';
-            const tag = `build-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
             const files = (await fs.readdir('installer')).filter(name => name.endsWith('-setup.exe'));
             if (files.length !== 1) throw new Error('Expected exactly one Windows installer.');
             const name = files[0];
             const version = /^SaveHub_(\d+\.\d+\.\d+)_x64-setup\.exe$/.exec(name)?.[1];
             if (!version) throw new Error('Stable numeric application version expected in installer filename.');
+            const sha = process.env.SOURCE_SHA;
+            if (!/^[0-9a-f]{40}$/i.test(sha ?? '')) throw new Error('A full source commit SHA is required.');
+            const tag = prerelease ? `v${version}-preview.${sha.slice(0, 12)}` : `v${version}`;
+            // Published releases are immutable: never replace another version's assets.
+            let existing;
+            try { existing = (await github.rest.repos.getReleaseByTag({ ...context.repo, tag })).data; }
+            catch (error) { if (error.status !== 404) throw error; }
+            if (existing) throw new Error(`Release ${tag} already exists. Use a new version/preview commit, or remove an unfinished draft before retrying.`);
             let signature;
             if (!prerelease) {
               signature = (await fs.readFile(`installer/${name}.sig`, 'utf8')).trim();
@@ -202,7 +209,7 @@ jobs:
               ...context.repo,
               tag_name: tag,
               target_commitish: process.env.SOURCE_SHA,
-              name: `SaveHub Windows x64 ${prerelease ? 'preview' : 'release'} ${tag}`,
+              name: `SaveHub ${version}`,
               body: `Commit: ${process.env.SOURCE_SHA}\n\nBuild: ${runUrl}\n\nSHA256 (${name}): \`${checksum}\``,
               draft: true,
               prerelease,
