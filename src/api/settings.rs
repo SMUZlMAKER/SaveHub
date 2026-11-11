@@ -5,13 +5,15 @@ use std::sync::Arc;
 use tauri::State;
 
 use super::{ApiError, ApiResult};
-use crate::background::repo::RepoWorkerHandle;
-use crate::services::settings::SettingsService;
+use crate::background::{catalog::CatalogWorker, repo::RepoWorkerHandle};
+use crate::services::{game::GameService, settings::SettingsService};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsDto {
-    /// Удаленный репозиторий для сохранений, например `https://github.com/user/saves`.
+    /// Отдельный репозиторий списка игр.
+    pub catalog_repo_url: Option<String>,
+    /// Удаленный репозиторий сохранений.
     pub repo_url: Option<String>,
     /// Локальный клон этого репозитория.
     pub local_repo_path: Option<String>,
@@ -28,6 +30,7 @@ pub struct SettingsDto {
 pub fn get_settings(service: State<'_, Arc<SettingsService>>) -> ApiResult<SettingsDto> {
     let data = service.get()?;
     Ok(SettingsDto {
+        catalog_repo_url: data.catalog_repo_url,
         repo_url: data.repo_url,
         local_repo_path: data
             .local_repo_path
@@ -46,10 +49,16 @@ pub async fn update_settings(
     settings: SettingsDto,
     service: State<'_, Arc<SettingsService>>,
     worker: State<'_, RepoWorkerHandle>,
+    catalog_worker: State<'_, CatalogWorker>,
+    games: State<'_, Arc<GameService>>,
+    app: tauri::AppHandle,
 ) -> ApiResult<()> {
+    let previous_url = service.get()?.catalog_repo_url;
+    let updated_service = service.inner().clone();
     let service = service.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         service.update(|data| {
+            data.catalog_repo_url = settings.catalog_repo_url;
             data.repo_url = settings.repo_url;
             data.local_repo_path = settings.local_repo_path.map(std::path::PathBuf::from);
             data.sync_after_session = settings.sync_after_session;
@@ -61,17 +70,28 @@ pub async fn update_settings(
     .await
     .map_err(|error| ApiError::Internal(error.to_string()))??;
     let _ = worker.wake();
+    if previous_url != updated_service.get()?.catalog_repo_url {
+        games.mark_sync_pending();
+        crate::app::catalog::notify_status(&app);
+        catalog_worker.request_sync();
+    }
     Ok(())
 }
 
-/// TODO(backend): положить токен в системное хранилище (Windows Credential Manager), не в файл настроек.
+/// Токен сохраняется отдельно в Windows Credential Manager.
 #[tauri::command]
 pub fn set_github_token(
     token: String,
     service: State<'_, Arc<SettingsService>>,
     worker: State<'_, RepoWorkerHandle>,
+    catalog_worker: State<'_, CatalogWorker>,
+    games: State<'_, Arc<GameService>>,
+    app: tauri::AppHandle,
 ) -> ApiResult<()> {
     service.set_github_token(token.trim())?;
     let _ = worker.wake();
+    games.mark_sync_pending();
+    crate::app::catalog::notify_status(&app);
+    catalog_worker.request_sync();
     Ok(())
 }

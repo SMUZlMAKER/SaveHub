@@ -55,6 +55,8 @@ pub fn start() {
             api::launch::confirm_game_launch,
             api::launch::cancel_game_launch,
             api::games::list_games,
+            api::games::get_catalog_status,
+            api::games::sync_catalog,
             api::games::get_game_status,
             api::games::add_game,
             api::games::update_game,
@@ -87,10 +89,12 @@ pub fn start() {
         ])
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_dir)?;
+            let directory = config::DataDirectory::lock(data_dir.clone())
+                .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
             let settings_path = data_dir.join("settings.json");
             let local_config_path = data_dir.join("local_config.json");
             let default_settings = SettingsData {
+                catalog_repo_url: None,
                 repo_url: None,
                 local_repo_path: None,
                 sync_after_session: true,
@@ -143,11 +147,15 @@ pub fn start() {
                 settings_path,
                 operations.clone(),
             )));
-            let game_service = Arc::new(GameService::new(
-                catalog.clone(),
-                runtime.clone(),
-                settings.clone(),
-            ));
+            let game_service = Arc::new(
+                GameService::persistent_in(
+                    catalog.clone(),
+                    runtime.clone(),
+                    settings.clone(),
+                    directory,
+                )
+                .map_err(|error| std::io::Error::other(format!("{error:?}")))?,
+            );
             let profile_service = Arc::new(ProfileService::new(
                 catalog.clone(),
                 runtime.clone(),
@@ -169,7 +177,7 @@ pub fn start() {
                 settings.clone(),
             )));
             app.manage(process_service);
-            app.manage(game_service);
+            app.manage(game_service.clone());
             app.manage(profile_service);
             app.manage(settings);
             app.manage(repo_service.clone());
@@ -201,6 +209,10 @@ pub fn start() {
             shutdown_for_setup.store(false, Ordering::Release);
 
             crate::background::updates::spawn(app.handle().clone());
+            app.manage(crate::background::catalog::spawn(
+                app.handle().clone(),
+                game_service,
+            ));
             let args: Vec<String> = std::env::args().collect();
             if args.iter().any(|arg| arg == "--launch-game") {
                 crate::app::launch::handle_arguments(app.handle().clone(), args);

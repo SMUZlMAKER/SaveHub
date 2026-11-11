@@ -5,7 +5,7 @@ use crate::{
         launch::{GameProcessDto, LaunchProfileDto, LaunchStatus},
     },
     domain::{GameId, ProfileId},
-    services::{game::GameService, process::ProcessService},
+    services::game::GameService,
     workflows::launch_game::LaunchGame,
 };
 use std::sync::{
@@ -135,11 +135,10 @@ async fn prepare(app: &tauri::AppHandle, game_id: GameId) -> ApiResult<LaunchSta
         .app_data_dir()
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .join("launchers");
-    let processes = app.state::<Arc<ProcessService>>().inner().clone();
     let workflow = app.state::<Arc<LaunchGame>>().inner().clone();
     let games = app.state::<Arc<GameService>>().inner().clone();
     let (plan, game) = tauri::async_runtime::spawn_blocking(move || {
-        processes.restore_registration(game_id, &directory)?;
+        games.restore_launcher_registration(game_id, &directory)?;
         let game = games.get(game_id)?;
         Ok::<_, crate::services::ServiceError>((workflow.prepare()?, game))
     })

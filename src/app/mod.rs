@@ -4,3 +4,4 @@ pub mod tray;
 pub mod updates;
 
 pub mod launch;
+pub mod catalog;

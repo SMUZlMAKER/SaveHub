@@ -110,7 +110,7 @@
             <option value="ignore">Игнорировать игру на этом ПК</option>
           </select>
         </label>
-        {#if action === 'updateRepository'}<p class="muted">Изменение путей для всех ПК пока недоступно. Можно указать локальные пути.</p>{/if}
+        {#if action === 'updateRepository'}<p class="muted">Пути будут изменены в общем списке и отправлены на другие ПК.</p>{/if}
         {#if ignored}<p class="muted">Игра останется в общем списке. Её файлы не изменятся.</p>{/if}
       {:else}
         <label class="field"><span>Название игры</span>
@@ -153,7 +153,7 @@
       {#if error}<p class="error" role="alert">{error}</p>{/if}
       <div class="actions">
         <button type="button" onclick={() => { request++; oncancel() }}>Отмена</button>
-        <button class="primary" disabled={mode === 'resolve' && action === 'updateRepository'}>{saving ? 'Сохраняем…' : mode === 'add' ? 'Добавить игру' : ignored ? 'Игнорировать на этом ПК' : 'Сохранить'}</button>
+        <button class="primary">{saving ? 'Сохраняем…' : mode === 'add' ? 'Добавить игру' : ignored ? 'Игнорировать на этом ПК' : 'Сохранить'}</button>
       </div>
     </fieldset>
   </form>

@@ -8,6 +8,34 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// One application owns the directory until the OS closes this handle, including after a crash.
+/// Keep the lock file itself: unlinking it would allow locking different inodes.
+pub struct DataDirectory {
+    path: PathBuf,
+    _lock: fs::File,
+}
+
+impl DataDirectory {
+    pub fn lock(path: PathBuf) -> AdapterResult<Self> {
+        fs::create_dir_all(&path).map_err(super::AdapterError::Io)?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.join("savehub.lock"))
+            .map_err(super::AdapterError::Io)?;
+        lock.try_lock().map_err(|error| super::AdapterError::InvalidData(format!(
+            "Не удалось заблокировать каталог SaveHub. Закройте другую копию приложения: {error}"
+        )))?;
+        Ok(Self { path, _lock: lock })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 pub fn read_games(path: &Path) -> AdapterResult<Option<Vec<Game>>> {
     read_json(path)
 }
@@ -46,6 +74,39 @@ pub fn publish_game_registration(
         }
     }
     result
+}
+
+#[derive(Debug)]
+pub enum RegistrationWriteError {
+    Unchanged(super::AdapterError),
+    LocalOnly {
+        write: super::AdapterError,
+        rollback: super::AdapterError,
+    },
+}
+
+/// Publish neither file to Git until both writes have succeeded. If the second
+/// replacement fails, restore the old local settings and report rollback failures explicitly.
+pub fn write_registration(
+    games_path: &Path,
+    games: Option<&[Game]>,
+    local_path: &Path,
+    local: Option<(&LocalConfig, &LocalConfig)>,
+) -> Result<(), RegistrationWriteError> {
+    if let Some((_, next)) = local {
+        write_local_config(local_path, next).map_err(RegistrationWriteError::Unchanged)?;
+    }
+    if let Some(games) = games {
+        if let Err(write) = write_games(games_path, games) {
+            if let Some((previous, _)) = local {
+                if let Err(rollback) = write_local_config(local_path, previous) {
+                    return Err(RegistrationWriteError::LocalOnly { write, rollback });
+                }
+            }
+            return Err(RegistrationWriteError::Unchanged(write));
+        }
+    }
+    Ok(())
 }
 
 pub fn read_profiles(path: &Path) -> AdapterResult<Option<Vec<Profile>>> {
@@ -153,6 +214,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn registration_rolls_back_local_config_when_games_write_fails() {
+        let root =
+            std::env::temp_dir().join(format!("savehub-paired-config-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("games.json")).unwrap();
+        let local_path = root.join("local_config.json");
+        let previous = LocalConfig {
+            machine_id: "before".into(),
+            games: Default::default(),
+        };
+        let next = LocalConfig {
+            machine_id: "after".into(),
+            games: Default::default(),
+        };
+        write_local_config(&local_path, &previous).unwrap();
+        let result = write_registration(
+            &root.join("games.json"),
+            Some(&[]),
+            &local_path,
+            Some((&previous, &next)),
+        );
+        assert!(matches!(result, Err(RegistrationWriteError::Unchanged(_))));
+        assert_eq!(read_local_config(&local_path).unwrap().unwrap(), previous);
+        assert!(root.join("games.json").is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn data_directory_lock_child() {
+        if let Some(path) = std::env::var_os("SAVEHUB_TEST_LOCK_PATH") {
+            assert!(DataDirectory::lock(path.into()).is_err());
+        }
+    }
+
+    #[test]
+    fn data_directory_lock_excludes_other_process_and_releases_on_drop() {
+        let root = std::env::temp_dir().join(format!("savehub-lock-{}", uuid::Uuid::new_v4()));
+        let owner = DataDirectory::lock(root.clone()).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "adapters::config::tests::data_directory_lock_child",
+            ])
+            .env("SAVEHUB_TEST_LOCK_PATH", &root)
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        drop(owner);
+        drop(DataDirectory::lock(root.clone()).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn overwrites_existing_json_atomically() {
         let path = std::env::temp_dir().join(format!(
             "savehub-config-test-{}-{}.json",
@@ -163,6 +280,7 @@ mod tests {
                 .as_nanos()
         ));
         let first = SettingsData {
+            catalog_repo_url: None,
             repo_url: Some("first".into()),
             local_repo_path: None,
             sync_after_session: true,
@@ -172,6 +290,7 @@ mod tests {
             start_minimized: false,
         };
         let second = SettingsData {
+            catalog_repo_url: None,
             repo_url: Some("second".into()),
             ..first.clone()
         };

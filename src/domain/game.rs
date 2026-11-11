@@ -5,7 +5,7 @@ use uuid::Uuid;
 /// Создаётся как UUID v4 при добавлении игры; одинаков на всех ПК и во всех профилях.
 pub type GameId = Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Game {
     pub id: GameId,
     pub name: String,
@@ -14,14 +14,14 @@ pub struct Game {
     pub process_names: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GamePaths {
     /// Исходная строка может содержать %APPDATA%, %USERPROFILE% и т.п.
     pub save_dir_path: String,
     pub exe_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PathResolution {
     Ignore,
     UpdateRepository(GamePaths),

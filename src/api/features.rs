@@ -20,7 +20,7 @@ pub fn get_app_features() -> AppFeatures {
         profile_switch: false,
         save_history: false,
         conflicts: false,
-        persistent_games: false,
+        persistent_games: true,
         persistent_profiles: false,
     }
 }

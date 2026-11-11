@@ -286,6 +286,7 @@ mod tests {
         let catalog = Arc::new(Catalog::new(HashMap::from([(id, game)]), HashMap::new()));
         let settings = Arc::new(Settings::new(
             SettingsData {
+                catalog_repo_url: None,
                 repo_url: None,
                 local_repo_path: None,
                 sync_after_session: false,
@@ -363,6 +364,7 @@ mod launch_tests {
         ));
         let settings = Arc::new(Settings::new(
             SettingsData {
+                catalog_repo_url: None,
                 repo_url: None,
                 local_repo_path: None,
                 sync_after_session: false,

@@ -23,6 +23,9 @@ pub struct RepositoryConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsData {
+    /// Отдельный репозиторий списка игр, единственная рабочая ветка — main.
+    #[serde(default)]
+    pub catalog_repo_url: Option<String>,
     pub repo_url: Option<String>,
     pub local_repo_path: Option<PathBuf>,
     pub sync_after_session: bool,
@@ -34,7 +37,7 @@ pub struct SettingsData {
 }
 
 /// Локальный файл вне Git-репозитория сохранений; ключ — UUID игры, не профиль.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalConfig {
     pub machine_id: String,
     /// В том числе запоминает выбор UpdateRepository.
@@ -86,7 +89,7 @@ pub enum ConflictResolution {
     CreateProfile { name: String },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncState {
     NotConfigured,
     Idle,
@@ -94,7 +97,7 @@ pub enum SyncState {
     Error,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncStatus {
     pub state: SyncState,
     pub last_sync_at: Option<u64>,

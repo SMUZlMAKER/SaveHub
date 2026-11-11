@@ -1,6 +1,7 @@
-//! Game setup IPC. Registration is currently in memory; no save files are moved.
+//! Game setup IPC. Catalogue is persisted separately; no save files are moved.
 use super::{ApiError, ApiResult};
 use crate::{
+    background::catalog::CatalogWorker,
     domain::{Game, GameId, GamePaths, PathResolution, RuntimeState, Settings},
     services::game::GameService,
 };
@@ -9,7 +10,7 @@ use std::{
     path::Path,
     sync::{Arc, OnceLock},
 };
-use tauri::{Emitter, State};
+use tauri::State;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,6 +110,7 @@ pub async fn add_game(
     exe_path: String,
     save_path: String,
     app: tauri::AppHandle,
+    worker: State<'_, CatalogWorker>,
     service: State<'_, Arc<GameService>>,
     settings: State<'_, Arc<Settings>>,
     runtime: State<'_, Arc<RuntimeState>>,
@@ -118,14 +120,19 @@ pub async fn add_game(
         settings.inner().clone(),
         runtime.inner().clone(),
     );
+    let previous_revision = service.revision();
+    let previous_status = service.status();
+    let observer = service.clone();
     let result = blocking(move || {
         let game = service.add_with_paths(&name, paths(exe_path, save_path))?;
         Ok(to_dto(&game, &settings, &runtime))
     })
-    .await?;
-    // Mutation already succeeded; an event delivery error must not invite a duplicate add.
-    let _ = app.emit(super::events::GAMES_CHANGED, ());
-    Ok(result)
+    .await;
+    crate::app::catalog::notify_changes(&app, &observer, previous_revision);
+    if observer.status() != previous_status {
+        worker.reschedule();
+    }
+    result
 }
 #[tauri::command]
 pub async fn update_game(
@@ -134,6 +141,7 @@ pub async fn update_game(
     exe_path: String,
     save_path: String,
     app: tauri::AppHandle,
+    worker: State<'_, CatalogWorker>,
     service: State<'_, Arc<GameService>>,
     settings: State<'_, Arc<Settings>>,
     runtime: State<'_, Arc<RuntimeState>>,
@@ -143,13 +151,19 @@ pub async fn update_game(
         settings.inner().clone(),
         runtime.inner().clone(),
     );
+    let previous_revision = service.revision();
+    let previous_status = service.status();
+    let observer = service.clone();
     let result = blocking(move || {
         let game = service.update_with_paths(game_id, &name, paths(exe_path, save_path))?;
         Ok(to_dto(&game, &settings, &runtime))
     })
-    .await?;
-    let _ = app.emit(super::events::GAMES_CHANGED, ());
-    Ok(result)
+    .await;
+    crate::app::catalog::notify_changes(&app, &observer, previous_revision);
+    if observer.status() != previous_status {
+        worker.reschedule();
+    }
+    result
 }
 #[tauri::command]
 pub async fn resolve_game_paths(
@@ -158,6 +172,7 @@ pub async fn resolve_game_paths(
     exe_path: Option<String>,
     save_path: Option<String>,
     app: tauri::AppHandle,
+    worker: State<'_, CatalogWorker>,
     service: State<'_, Arc<GameService>>,
     settings: State<'_, Arc<Settings>>,
     runtime: State<'_, Arc<RuntimeState>>,
@@ -167,13 +182,15 @@ pub async fn resolve_game_paths(
         settings.inner().clone(),
         runtime.inner().clone(),
     );
+    let previous_revision = service.revision();
+    let previous_status = service.status();
+    let observer = service.clone();
     let result = blocking(move || {
         let game = match action {
-            PathAction::UpdateRepository => {
-                return Err(ApiError::NotImplemented(
-                    "resolve_game_paths:updateRepository",
-                ));
-            }
+            PathAction::UpdateRepository => service.update_shared_paths(
+                game_id,
+                paths(exe_path.unwrap_or_default(), save_path.unwrap_or_default()),
+            )?,
             PathAction::Ignore => service.ignore_on_this_pc(game_id)?,
             PathAction::UseLocal => service.use_local_paths(
                 game_id,
@@ -182,9 +199,49 @@ pub async fn resolve_game_paths(
         };
         Ok(to_dto(&game, &settings, &runtime))
     })
-    .await?;
-    let _ = app.emit(super::events::GAMES_CHANGED, ());
-    Ok(result)
+    .await;
+    crate::app::catalog::notify_changes(&app, &observer, previous_revision);
+    if observer.status() != previous_status {
+        worker.reschedule();
+    }
+    result
+}
+
+#[tauri::command]
+pub fn get_catalog_status(
+    service: State<'_, Arc<GameService>>,
+) -> ApiResult<super::sync::SyncStatusDto> {
+    let status = service.status();
+    Ok(super::sync::SyncStatusDto {
+        state: match status.state {
+            crate::domain::SyncState::NotConfigured => super::sync::SyncState::NotConfigured,
+            crate::domain::SyncState::Idle => super::sync::SyncState::Idle,
+            crate::domain::SyncState::Syncing => super::sync::SyncState::Syncing,
+            crate::domain::SyncState::Error => super::sync::SyncState::Error,
+        },
+        last_sync_at: status.last_sync_at,
+        error: status.error,
+    })
+}
+
+#[tauri::command]
+pub async fn sync_catalog(
+    app: tauri::AppHandle,
+    worker: State<'_, CatalogWorker>,
+    service: State<'_, Arc<GameService>>,
+) -> ApiResult<()> {
+    let service = service.inner().clone();
+    service.mark_sync_pending();
+    crate::app::catalog::notify_status(&app);
+    let previous_revision = service.revision();
+    let previous_status = service.status();
+    let observer = service.clone();
+    let result = blocking(move || service.sync_catalog().map_err(Into::into)).await;
+    crate::app::catalog::notify_changes(&app, &observer, previous_revision);
+    if observer.status() != previous_status {
+        worker.reschedule();
+    }
+    result
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -269,6 +326,7 @@ mod tests {
         };
         let settings = Settings::new(
             SettingsData {
+                catalog_repo_url: None,
                 repo_url: None,
                 local_repo_path: None,
                 sync_after_session: false,

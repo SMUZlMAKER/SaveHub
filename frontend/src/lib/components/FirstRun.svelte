@@ -37,7 +37,7 @@
       <li><div class="grow"><strong>Доступ к GitHub</strong><span class="muted block">{settings?.hasGithubToken ? 'Токен сохранён; доступ к репозиторию ещё не подтверждён' : 'Сохраните токен в настройках'}</span></div><button onclick={onsettings}>{settings?.hasGithubToken ? 'Настройки' : 'Указать токен'}</button></li>
       <li><div class="grow"><strong>Первая игра</strong><span class="muted block">{gamesLoading ? 'Проверяем список игр…' : gamesError ? 'Список игр не удалось загрузить' : hasGames ? 'Игра добавлена в список' : 'Выберите exe и папку сохранений'}</span></div><button disabled={gamesLoading || !!gamesError || adding} onclick={onadd}>{hasGames ? 'Добавить ещё' : 'Добавить игру'}</button></li>
     </ol>
-    <p class="muted">{features.sync ? 'Заполнение параметров не подтверждает подключение. Результат синхронизации появится вверху окна.' : 'Синхронизация пока недоступна в этой версии. Можно подготовить настройки и выбрать игры.'}</p>
+    <p class="muted">{features.sync ? 'Заполнение параметров не подтверждает подключение. Результат синхронизации появится вверху окна.' : 'Синхронизация сохранений пока недоступна в этой версии. Можно подготовить настройки и выбрать игры.'}</p>
   {/if}
 </section>
 
