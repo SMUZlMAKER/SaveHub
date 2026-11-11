@@ -1,4 +1,6 @@
 <script lang="ts">
+  // TODO(frontend, отдельный PR): явно показывать выполненные шаги онбординга.
+  // TODO(frontend, отдельный PR): скрывать онбординг, когда все шаги выполнены.
   import { onMount } from 'svelte'
   import { api, describeError } from '../api'
   import type { AppFeatures, Settings } from '../types'

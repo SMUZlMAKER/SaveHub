@@ -84,6 +84,7 @@
       </label>
       <label class="field">
         <span class="muted">Локальная копия репозитория</span>
+        <!-- TODO(frontend): добавить кнопку «Обзор…» для выбора папки через системный диалог Проводника. -->
         <input bind:value={settings.localRepoPath} />
       </label>
 
