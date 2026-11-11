@@ -42,6 +42,7 @@ pub fn start() {
             api::settings::get_settings,
             api::settings::update_settings,
             api::settings::set_github_token,
+            api::settings::get_github_token,
             api::updates::get_app_preferences,
             api::updates::save_app_preferences,
             api::updates::get_update_status,

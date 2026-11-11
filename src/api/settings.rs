@@ -61,3 +61,9 @@ pub fn set_github_token(token: String, service: State<'_, Arc<SettingsService>>)
     service.set_github_token(token.trim())?;
     Ok(())
 }
+
+/// Прочитать сохранённый токен по явному запросу пользователя.
+#[tauri::command]
+pub fn get_github_token(service: State<'_, Arc<SettingsService>>) -> ApiResult<Option<String>> {
+    Ok(service.get_github_token()?)
+}
