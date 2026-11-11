@@ -45,6 +45,11 @@ impl SettingsService {
         self.persist()
     }
 
+    pub fn set_ask_profile_before_launch(&self, enabled: bool) -> ServiceResult<()> {
+        self.settings.set_ask_profile_before_launch(enabled);
+        self.persist()
+    }
+
     pub fn set_start_minimized(&self, enabled: bool) -> ServiceResult<()> {
         self.settings.set_start_minimized(enabled);
         self.persist()

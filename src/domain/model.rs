@@ -22,6 +22,8 @@ pub struct SettingsData {
     pub sync_after_session: bool,
     pub sync_while_gaming: bool,
     pub auto_switch_profile: bool,
+    #[serde(default = "default_ask_profile_before_launch")]
+    pub ask_profile_before_launch: bool,
     pub start_minimized: bool,
 }
 
@@ -103,4 +105,8 @@ pub enum GameProcessEvent {
 pub enum ProfileActivationError {
     ProcessesUnknown,
     GamesRunning(Vec<GameId>),
+}
+
+fn default_ask_profile_before_launch() -> bool {
+    true
 }

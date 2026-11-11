@@ -136,6 +136,7 @@ mod tests {
             sync_after_session: true,
             sync_while_gaming: false,
             auto_switch_profile: true,
+            ask_profile_before_launch: true,
             start_minimized: false,
         };
         let second = SettingsData {

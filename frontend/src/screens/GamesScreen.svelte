@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { api, describeError, events, subscribe } from '../lib/api'
   import type { Game, GameStatus } from '../lib/types'
+  import { notice } from '../lib/notice.svelte'
   import GameForm from '../lib/components/GameForm.svelte'
 
   const statusLabel: Record<GameStatus, { text: string; tone: string }> = {
@@ -15,6 +16,19 @@
   let loadError = $state('')
   let savedNote = $state('')
   let editor = $state<{ mode: 'add' | 'edit' | 'resolve'; game?: Game } | null>(null)
+  let launching = $state<string | null>(null)
+  let shortcutting = $state<string | null>(null)
+  async function launch(game: Game) {
+    launching = game.id
+    try { await api.beginGameLaunch(game.id) } catch (e) { notice.error(e) }
+    finally { launching = null }
+  }
+  async function shortcut(game: Game) {
+    shortcutting = game.id
+    try { const result = await api.createGameShortcut(game.id); notice.show(`Ярлык создан: ${result.path}`) }
+    catch (e) { notice.error(e) }
+    finally { shortcutting = null }
+  }
   let generation = 0
   async function load() {
     const current = ++generation
@@ -73,6 +87,8 @@
           {#if game.status === 'running'}<div class="muted">Закройте игру, чтобы изменить её настройки.</div>{/if}
         </div>
         <div class="game-actions">
+          <button class="primary" disabled={!!editor || !!launching || game.status !== 'found'} onclick={() => launch(game)}>{launching === game.id ? 'Подготовка…' : 'Запустить'}</button>
+          <button disabled={!!editor || !!shortcutting || game.status !== 'found'} onclick={() => shortcut(game)}>{shortcutting === game.id ? 'Создание…' : 'Ярлык на рабочий стол'}</button>
           <button disabled={!!editor || game.status === 'running'} onclick={() => edit('edit', game)}>Настроить</button>
           <button disabled={!!editor || game.status === 'running'} onclick={() => edit('resolve', game)}>{game.status === 'ignored' ? 'Подключить на этом ПК' : 'Пути на этом ПК'}</button>
         </div>

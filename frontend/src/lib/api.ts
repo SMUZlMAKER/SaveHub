@@ -11,6 +11,8 @@ import type {
   ConflictResolution,
   Game,
   GameInput,
+  LaunchStatus,
+  Shortcut,
   PathAction,
   PathValidation,
   SaveSuggestion,
@@ -63,6 +65,11 @@ export function describeError(e: unknown): string {
 
 // Ключи аргументов — camelCase: Tauri сам сопоставит их со snake_case-параметрами в Rust.
 export const api = {
+  getLaunchStatus: () => call<LaunchStatus>("get_launch_status"),
+  createGameShortcut: (gameId: string) => call<Shortcut>("create_game_shortcut", { gameId }),
+  beginGameLaunch: (gameId: string) => call<LaunchStatus>("begin_game_launch", { gameId }),
+  confirmGameLaunch: (requestId: string, profileId: string) => call<LaunchStatus>("confirm_game_launch", { requestId, profileId }),
+  cancelGameLaunch: (requestId: string) => call<void>("cancel_game_launch", { requestId }),
   getAppPreferences: () => call<AppPreferences>("get_app_preferences"),
   saveAppPreferences: (preferences: AppPreferences) =>
     call<void>("save_app_preferences", {
@@ -141,6 +148,8 @@ export const api = {
 
 /** События бэкенда, см. src/api/events.rs. */
 export const events = {
+  launchStatusChanged: 'launch-status-changed',
+  gameProcessChanged: 'game-process-changed',
   gamesChanged: "games-changed",
   profileChanged: "profile-changed",
   snapshotsChanged: "snapshots-changed",

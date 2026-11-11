@@ -12,7 +12,8 @@
   let loadError = $state<string | null>(null)
   let token = $state('')
 
-  const toggles: { key: 'syncAfterSession' | 'syncWhileGaming' | 'autoSwitchProfile'; title: string; hint: string }[] = [
+  const toggles: { key: 'syncAfterSession' | 'syncWhileGaming' | 'autoSwitchProfile' | 'askProfileBeforeLaunch'; title: string; hint: string }[] = [
+    { key: 'askProfileBeforeLaunch', title: 'Выбирать профиль перед запуском игры', hint: 'Показывать выбор, если профилей больше одного' },
     { key: 'syncAfterSession', title: 'Синхронизировать после каждой сессии', hint: 'Когда игра закрывается' },
     { key: 'syncWhileGaming', title: 'Синхронизировать во время игры', hint: 'Может мешать игре, если сохранения большие' },
     {

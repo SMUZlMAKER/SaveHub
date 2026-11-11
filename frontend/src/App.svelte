@@ -3,7 +3,8 @@
   import { api, events, subscribe } from './lib/api'
   import { formatAgo } from './lib/format'
   import { notice } from './lib/notice.svelte'
-  import type { ScreenId, SyncStatus, UpdateStatus } from './lib/types'
+  import type { GameProcessEvent, ScreenId, SyncStatus, UpdateStatus } from './lib/types'
+  import LaunchPanel from './lib/components/LaunchPanel.svelte'
   import GamesScreen from './screens/GamesScreen.svelte'
   import ProfilesScreen from './screens/ProfilesScreen.svelte'
   import SnapshotsScreen from './screens/SnapshotsScreen.svelte'
@@ -18,6 +19,7 @@
   ]
   const screenIds: ScreenId[] = ['games', 'profiles', 'snapshots', 'settings', 'conflicts']
 
+  let processError = $state('')
   let update = $state<UpdateStatus | null>(null)
   let screen = $state<ScreenId>('games')
   let sync = $state<SyncStatus | null>(null)
@@ -74,6 +76,7 @@
     loadConflicts()
     const timer = setInterval(() => (now = Date.now()), 30_000)
     const stops = [
+      subscribe<GameProcessEvent>(events.gameProcessChanged, (event) => { processError = event.error ?? '' }),
       subscribe<UpdateStatus>(events.updateStatusChanged, (value) => { update = value }),
       subscribe(events.syncStatusChanged, loadSync),
       subscribe(events.conflictsChanged, loadConflicts),
@@ -114,6 +117,9 @@
     <button onclick={() => (screen = 'settings')}>Открыть обновления</button>
   </aside>
 {/if}
+
+{#if processError}<aside class="error" role="alert">{processError}</aside>{/if}
+<LaunchPanel />
 
 <main>
   {#if screen === 'games'}

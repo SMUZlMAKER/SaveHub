@@ -1,5 +1,5 @@
 //! События, которые бэкенд шлет фронту (`AppHandle::emit`). Фронт по ним перезапрашивает данные,
-//! payload не нужен. Имена продублированы во frontend/src/lib/api.ts.
+//! Для событий без payload фронт перезапрашивает данные. Имена продублированы во frontend/src/lib/api.ts.
 
 /// Изменился список игр или их статус (нашелся путь, игра запустилась или закрылась).
 pub const GAMES_CHANGED: &str = "games-changed";
@@ -16,3 +16,8 @@ pub const NAVIGATE: &str = "navigate";
 
 /// Payload — UpdateStatus: состояние проверки или установки обновления.
 pub const UPDATE_STATUS_CHANGED: &str = "update-status-changed";
+
+/// Payload — LaunchStatus: подготовка, выбор профиля и результат запуска.
+pub const LAUNCH_STATUS_CHANGED: &str = "launch-status-changed";
+/// Payload — GameProcessDto: gameId, state (started/stopped/unknown), pid, error.
+pub const GAME_PROCESS_CHANGED: &str = "game-process-changed";
