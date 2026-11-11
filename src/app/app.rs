@@ -156,15 +156,16 @@ pub fn start() {
                 )
                 .map_err(|error| std::io::Error::other(format!("{error:?}")))?,
             );
-            let profile_service = Arc::new(ProfileService::new(
-                catalog.clone(),
-                runtime.clone(),
-                settings.clone(),
-            ));
             let repo_service = Arc::new(RepoService::new(
                 catalog.clone(),
                 runtime.clone(),
                 settings.clone(),
+            ));
+            let profile_service = Arc::new(ProfileService::with_operations(
+                catalog.clone(),
+                runtime.clone(),
+                repo_service.clone(),
+                operations.clone(),
             ));
             let process_service = Arc::new(crate::services::process::ProcessService::new(
                 catalog.clone(),

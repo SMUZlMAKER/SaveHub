@@ -14,6 +14,7 @@ use crate::services::profile::ProfileService;
 pub struct ProfileDto {
     pub id: String,
     pub name: String,
+    pub branch: String,
     pub is_active: bool,
     /// Для скольких игр у профиля есть сохранения.
     pub games_count: u32,
@@ -49,26 +50,31 @@ pub async fn switch_profile(profile_id: ProfileId) -> ApiResult<()> {
     Err(ApiError::NotImplemented("switch_profile"))
 }
 
-
 #[tauri::command]
-pub fn create_profile(
+pub async fn create_profile(
     app: tauri::AppHandle,
     name: String,
     service: State<'_, Arc<ProfileService>>,
 ) -> ApiResult<ProfileDto> {
-    let profile = service.create(&name)?;
+    let service = service.inner().clone();
+    let profile = tauri::async_runtime::spawn_blocking(move || service.create(&name))
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))??;
     app.emit(PROFILE_CHANGED, ())
         .map_err(|error| ApiError::Internal(error.to_string()))?;
     Ok(to_dto(&profile, false))
 }
 
 #[tauri::command]
-pub fn delete_profile(
+pub async fn delete_profile(
     app: tauri::AppHandle,
     profile_id: ProfileId,
     service: State<'_, Arc<ProfileService>>,
 ) -> ApiResult<()> {
-    service.delete(&profile_id)?;
+    let service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || service.delete(&profile_id))
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))??;
     app.emit(PROFILE_CHANGED, ())
         .map_err(|error| ApiError::Internal(error.to_string()))?;
     Ok(())
@@ -78,6 +84,7 @@ fn to_dto(profile: &Profile, is_active: bool) -> ProfileDto {
     ProfileDto {
         id: profile.id.to_string(),
         name: profile.name.clone(),
+        branch: profile.branch.clone(),
         is_active,
         games_count: 0,
         last_played_game: profile.last_played_game.as_ref().map(ToString::to_string),

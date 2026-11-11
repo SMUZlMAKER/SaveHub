@@ -92,6 +92,7 @@
       <li class="row">
         <div class="grow">
           <div>{profile.name}</div>
+          <div class="muted">Ветка: <code>{profile.branch}</code></div>
           <div class="muted">{describe(profile)}</div>
         </div>
         {#if profile.isActive}

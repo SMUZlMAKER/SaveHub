@@ -28,6 +28,7 @@ export interface Game {
 export interface Profile {
   id: string;
   name: string;
+  branch: string;
   isActive: boolean;
   gamesCount: number;
   lastPlayedGame: string | null;

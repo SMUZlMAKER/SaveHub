@@ -134,8 +134,26 @@ fn replace(source: &Path, destination: &Path) -> AdapterResult<()> {
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain([0]).collect();
-    let destination_wide: Vec<u16> = destination.as_os_str().encode_wide().chain([0]).collect();
+    // Canonicalization provides the extended Windows path prefix required by
+    // MoveFileExW for long paths. Resolve only the destination parent: the leaf
+    // may not exist yet and must never be followed as a symlink.
+    let source_path = fs::canonicalize(source).map_err(|error| io_error(source, error))?;
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = destination
+        .file_name()
+        .ok_or_else(|| invalid("Missing destination name"))?;
+    let destination_path = fs::canonicalize(parent)
+        .map_err(|error| io_error(destination, error))?
+        .join(name);
+    let source: Vec<u16> = source_path.as_os_str().encode_wide().chain([0]).collect();
+    let destination_wide: Vec<u16> = destination_path
+        .as_os_str()
+        .encode_wide()
+        .chain([0])
+        .collect();
     let result = unsafe {
         MoveFileExW(
             source.as_ptr(),
@@ -365,6 +383,23 @@ mod tests {
         );
         let unknown = format!("%SAVEHUB_UNDEFINED_{}%/saves%", uuid::Uuid::new_v4());
         assert_eq!(expand_path(&unknown).unwrap(), PathBuf::from(unknown));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_supports_paths_longer_than_windows_max_path() {
+        use std::os::windows::ffi::OsStrExt;
+        let sandbox = Sandbox::new();
+        let mut directory = sandbox.path("long-path");
+        while directory.as_os_str().encode_wide().count() < 280 {
+            directory.push("nested-save-directory");
+        }
+        let path = directory.join("save.dat");
+        assert!(path.as_os_str().encode_wide().count() > 260);
+        write_atomic(&path, b"original\0").unwrap();
+        write_atomic(&path, b"replacement\0").unwrap();
+        assert_eq!(read(&path).unwrap(), b"replacement\0");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
     }
 
     #[test]

@@ -11,6 +11,14 @@ struct CatalogInner {
 }
 
 impl Catalog {
+    /// Replace profile metadata without touching the independently managed games.
+    pub fn replace_profiles(&self, profiles: Vec<Profile>) {
+        let mut inner = self.inner.write().expect("Catalog lock poisoned");
+        inner.profiles = profiles
+            .into_iter()
+            .map(|profile| (profile.id, profile))
+            .collect();
+    }
     pub fn new(games: HashMap<GameId, Game>, profiles: HashMap<ProfileId, Profile>) -> Self {
         Self {
             inner: RwLock::new(CatalogInner { games, profiles }),
@@ -145,6 +153,12 @@ impl RuntimeStateInner {
 }
 
 impl RuntimeState {
+    pub fn replace_conflicts(&self, conflicts: Vec<Conflict>) {
+        self.inner
+            .write()
+            .expect("RuntimeState lock poisoned")
+            .conflicts = conflicts;
+    }
     pub fn new(
         active_profile: Option<ProfileId>,
         conflicts: Vec<Conflict>,
