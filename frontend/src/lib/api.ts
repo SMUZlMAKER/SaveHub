@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   ApiErrorKind,
+  AppFeatures,
   AppPreferences,
   UpdateStatus,
   Conflict,
@@ -53,7 +54,7 @@ export function describeError(e: unknown): string {
   if (e instanceof BackendError) {
     switch (e.kind) {
       case "notImplemented":
-        return `Бэкенд пока не умеет: ${e.message}`;
+        return "Эта функция пока недоступна в установленной версии SaveHub.";
       case "rejected":
         return e.message;
       case "internal":
@@ -65,6 +66,7 @@ export function describeError(e: unknown): string {
 
 // Ключи аргументов — camelCase: Tauri сам сопоставит их со snake_case-параметрами в Rust.
 export const api = {
+  getAppFeatures: () => call<AppFeatures>("get_app_features"),
   dismissLaunchDialog: () => call<void>("dismiss_launch_dialog"),
   getLaunchStatus: () => call<LaunchStatus>("get_launch_status"),
   createGameShortcut: (gameId: string) => call<Shortcut>("create_game_shortcut", { gameId }),

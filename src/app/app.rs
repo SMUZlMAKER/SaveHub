@@ -29,6 +29,7 @@ pub fn start() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            api::features::get_app_features,
             api::launch::get_launch_status,
             api::launch::dismiss_launch_dialog,
             api::launch::create_game_shortcut,

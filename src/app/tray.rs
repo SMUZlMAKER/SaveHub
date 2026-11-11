@@ -39,8 +39,8 @@ impl TrayView {
     // TODO: убрать заглушку, когда появятся ProfileService и RuntimeState — брать данные из хранилищ.
     fn placeholder() -> Self {
         Self {
-            profiles: vec!["Основной".into(), "Гость".into()],
-            active_profile: Some("Основной".into()),
+            profiles: Vec::new(),
+            active_profile: None,
             running_game: None,
             last_sync: None,
         }
@@ -99,7 +99,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 
     let header = match &view.active_profile {
         Some(profile) => format!("Активный профиль: {profile}"),
-        None => "Профиль не выбран".to_owned(),
+        None => "Профили — в окне приложения".to_owned(),
     };
     menu.append(&MenuItem::new(app, header, false, None::<&str>)?)?;
 
@@ -125,8 +125,8 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     menu.append(&MenuItem::with_id(
         app,
         ID_SYNC,
-        "Синхронизировать сейчас",
-        true,
+        "Синхронизация пока недоступна",
+        false,
         None::<&str>,
     )?)?;
     menu.append(&MenuItem::with_id(
@@ -165,24 +165,6 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     Ok(menu)
 }
 
-/// Пересобрать меню после изменения состояния.
-fn refresh(app: &AppHandle) {
-    let Some(tray) = app.tray_by_id(TRAY_ID) else {
-        return;
-    };
-    match build_menu(app) {
-        Ok(menu) => {
-            let _ = tray.set_menu(Some(menu));
-        }
-        Err(err) => eprintln!("tray: не удалось пересобрать меню: {err}"),
-    }
-    let tooltip = match &app.state::<TrayState>().view.lock().unwrap().active_profile {
-        Some(profile) => format!("SaveHub — {profile}"),
-        None => "SaveHub".to_owned(),
-    };
-    let _ = tray.set_tooltip(Some(tooltip));
-}
-
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     match event.id.as_ref() {
         ID_SYNC => sync_now(app),
@@ -197,24 +179,14 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     }
 }
 
-fn switch_profile(app: &AppHandle, profile: &str) {
-    {
-        let state = app.state::<TrayState>();
-        let mut view = state.view.lock().unwrap();
-        // Пункты и так выключены, пока идет игра, но проверяем и здесь.
-        if view.running_game.is_none() {
-            // TODO: вызвать workflows::SwitchProfile вместо простой смены поля
-            view.active_profile = Some(profile.to_owned());
-        }
-    }
-    // Пересобираем даже без изменений: Windows сам переключает галочку у нажатого пункта.
-    refresh(app);
+fn switch_profile(app: &AppHandle, _profile: &str) {
+    // Until the real workflow is connected, never simulate a successful switch.
+    open_screen(app, "profiles");
 }
 
 fn sync_now(app: &AppHandle) {
-    // TODO: попросить RepoWorker синхронизировать репозиторий и обновить статус по результату
-    app.state::<TrayState>().view.lock().unwrap().last_sync = Some(SystemTime::now());
-    refresh(app);
+    // Until RepoWorker is connected, never invent a last-sync timestamp.
+    open_screen(app, "settings");
 }
 
 fn open_screen(app: &AppHandle, screen: &str) {
