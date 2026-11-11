@@ -76,9 +76,8 @@
     savedNote = ''; editor = { mode, game }
   }
   onMount(() => {
-    load(); loadStatus()
-    const stopGames = subscribe(events.gamesChanged, load)
-    const stopStatus = subscribe(events.catalogStatusChanged, loadStatus)
+    const stopGames = subscribe(events.gamesChanged, load, load)
+    const stopStatus = subscribe(events.catalogStatusChanged, loadStatus, loadStatus)
     return () => { stopGames(); stopStatus(); generation++; statusGeneration++ }
   })
 </script>

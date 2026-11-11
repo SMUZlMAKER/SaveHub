@@ -50,20 +50,11 @@ impl LaunchGame {
 
     pub fn prepare(&self) -> ServiceResult<LaunchPlan> {
         self.processes.refresh_running_games()?;
-        let mut profiles = self.profiles.list()?;
-        profiles.sort_by_key(|p| (p.name.to_lowercase(), p.id));
-        let active_profile = self.profiles.active()?.map(|p| p.id);
-        if profiles.is_empty() || active_profile.is_none() {
-            return Err(ServiceError::InvalidInput(
-                "Сначала настройте активный профиль".into(),
-            ));
-        }
-        let needs_profile = self.settings.data().ask_profile_before_launch && profiles.len() > 1;
-        Ok(LaunchPlan {
-            profiles,
-            active_profile,
-            needs_profile,
-        })
+        build_launch_plan(
+            self.profiles.list()?,
+            self.profiles.active()?.map(|p| p.id),
+            self.settings.data().ask_profile_before_launch,
+        )
     }
 
     pub fn execute(&self, game_id: GameId, profile_id: ProfileId) -> ServiceResult<u32> {
@@ -103,6 +94,25 @@ impl LaunchGame {
         }
         self.processes.launch(game_id)
     }
+}
+
+fn build_launch_plan(
+    mut profiles: Vec<Profile>,
+    active_profile: Option<ProfileId>,
+    ask_before_launch: bool,
+) -> ServiceResult<LaunchPlan> {
+    profiles.sort_by_key(|p| (p.name.to_lowercase(), p.id));
+    if profiles.is_empty() || active_profile.is_none() {
+        return Err(ServiceError::InvalidInput(
+            "Сначала настройте активный профиль".into(),
+        ));
+    }
+    let needs_profile = ask_before_launch && profiles.len() > 1;
+    Ok(LaunchPlan {
+        profiles,
+        active_profile,
+        needs_profile,
+    })
 }
 
 #[cfg(test)]
@@ -172,18 +182,32 @@ mod tests {
     }
     #[test]
     fn picker_respects_setting_and_profile_count() {
-        let (workflow, settings, _, _) = fixture(true);
-        assert!(workflow.prepare().unwrap().needs_profile);
-        settings.set_ask_profile_before_launch(false);
-        assert!(!workflow.prepare().unwrap().needs_profile);
-        settings.set_ask_profile_before_launch(true);
-        assert!(workflow.prepare().unwrap().needs_profile);
-        // The picker consumes the catalog; Git-backed profile deletion is tested separately.
-        let (single_profile, _, _, _) = fixture(false);
-        let plan = single_profile.prepare().unwrap();
+        let (workflow, _, runtime, _) = fixture(true);
+        let profiles = workflow.profiles.list().unwrap();
+        let active = runtime.active_profile();
+        assert!(
+            build_launch_plan(profiles.clone(), active, true)
+                .unwrap()
+                .needs_profile
+        );
+        assert!(
+            !build_launch_plan(profiles.clone(), active, false)
+                .unwrap()
+                .needs_profile
+        );
+        let (single, _, runtime, _) = fixture(false);
+        let plan = build_launch_plan(
+            single.profiles.list().unwrap(),
+            runtime.active_profile(),
+            true,
+        )
+        .unwrap();
         assert_eq!(plan.profiles.len(), 1);
         assert!(!plan.needs_profile);
+        assert!(build_launch_plan(vec![], active, true).is_err());
+        assert!(build_launch_plan(profiles, None, true).is_err());
     }
+
     #[test]
     fn unavailable_profile_switch_cannot_spawn_or_change_active_profile() {
         let (workflow, _, runtime, other) = fixture(true);

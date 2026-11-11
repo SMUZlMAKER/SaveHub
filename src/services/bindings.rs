@@ -78,7 +78,9 @@ pub(super) fn detach(
     })?;
     // Validate every link before modifying any of them.
     for (game, source) in affected {
-        let actual = fs::canonicalize(source).map_err(ServiceError::Adapter)?;
+        let actual = fs::link_destination(source)
+            .map_err(ServiceError::Adapter)?
+            .ok_or_else(|| ServiceError::Conflict("Привязка сохранений изменилась".into()))?;
         let mut owned = false;
         for profile in catalog.profiles().values() {
             if let Some(tree) =
@@ -87,9 +89,7 @@ pub(super) fn detach(
             {
                 let target = tree.join("games").join(game.to_string());
                 fs::require_plain_path(&tree, &target).map_err(ServiceError::Adapter)?;
-                if fs::exists(&target).map_err(ServiceError::Adapter)?
-                    && fs::canonicalize(&target).map_err(ServiceError::Adapter)? == actual
-                {
+                if fs::canonicalize_missing(&target).map_err(ServiceError::Adapter)? == actual {
                     owned = true;
                     break;
                 }

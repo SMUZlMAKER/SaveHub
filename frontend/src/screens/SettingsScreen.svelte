@@ -88,6 +88,8 @@
         <input bind:value={settings.localRepoPath} />
       </label>
 
+      <p class="muted">Укажите абсолютный путь к уже созданному Git-репозиторию. Автоматическое клонирование пока недоступно; для локальных профилей адрес GitHub необязателен.</p>
+
       <h3>Список игр</h3>
       <label class="field">
         <span class="muted">Отдельный репозиторий списка игр</span>
@@ -96,7 +98,7 @@
       <p class="muted">Создайте пустой репозиторий без README. Список обновляется автоматически; без подключения он хранится на этом ПК.</p>
 
       <h3>Передача сохранений между ПК</h3>
-      <p class="muted">Автоматическая отправка и получение сохранений ещё не реализованы. Эти параметры сохраняются для будущего подключения синхронизации.</p>
+      <p class="muted">Полная синхронизация между ПК пока недоступна. Фоновая отправка уже использует сохранённые параметры для настроенного локального репозитория.</p>
       <ul class="list settings-list">
         {#each syncToggles as toggle (toggle.key)}
           <li class="row"><label class="grow toggle"><span><span>{toggle.title}</span><span class="muted block">{toggle.hint}</span></span><input type="checkbox" bind:checked={settings[toggle.key]} disabled={!features.sync} /></label></li>
@@ -106,7 +108,7 @@
       <h3>Профиль при запуске игры</h3>
       <ul class="list settings-list">
         {#each launchToggles as toggle (toggle.key)}
-          <li class="row"><label class="grow toggle"><span><span>{toggle.title}</span><span class="muted block">{toggle.hint}</span></span><input type="checkbox" bind:checked={settings[toggle.key]} disabled={toggle.key === 'autoSwitchProfile' && !features.profileSwitch} /></label></li>
+          <li class="row"><label class="grow toggle"><span><span>{toggle.title}</span><span class="muted block">{toggle.hint}</span></span><input type="checkbox" bind:checked={settings[toggle.key]} disabled={toggle.key === 'autoSwitchProfile'} /></label></li>
         {/each}
       </ul>
 

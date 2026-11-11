@@ -80,7 +80,12 @@ pub fn detach_directory_link(source: &Path) -> AdapterResult<()> {
         return Ok(());
     }
     let staged = source.with_file_name(format!(".savehub-detach-{}", uuid::Uuid::new_v4()));
-    copy_tree(source, &staged)?;
+    if exists(source)? {
+        copy_tree(source, &staged)?;
+    } else {
+        // The caller has established ownership of the dangling link.
+        create_dir_all(&staged)?;
+    }
     replace_directory(source, &staged)?;
     Ok(())
 }
@@ -88,6 +93,45 @@ pub fn detach_directory_link(source: &Path) -> AdapterResult<()> {
 /// Resolve an existing path, including a managed root link.
 pub fn canonicalize(path: &Path) -> AdapterResult<PathBuf> {
     fs::canonicalize(path).map_err(|error| io_error(path, error))
+}
+
+/// Resolve existing ancestors without requiring the final storage directories to exist.
+/// Existing dangling links are errors, not missing directories.
+pub fn canonicalize_missing(path: &Path) -> AdapterResult<PathBuf> {
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    while metadata(ancestor)?.is_none() {
+        missing.push(
+            ancestor
+                .file_name()
+                .ok_or_else(|| invalid("Invalid storage path"))?,
+        );
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| invalid("Missing storage ancestor"))?;
+    }
+    let mut resolved = canonicalize(ancestor)?;
+    for name in missing.into_iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
+}
+
+/// Resolve the destination of a directory link, including a missing final directory.
+pub fn link_destination(source: &Path) -> AdapterResult<Option<PathBuf>> {
+    read_symlink(source)?
+        .map(|target| {
+            let target = if target.is_absolute() {
+                target
+            } else {
+                source
+                    .parent()
+                    .ok_or_else(|| invalid("Missing link parent"))?
+                    .join(target)
+            };
+            canonicalize_missing(&target)
+        })
+        .transpose()
 }
 
 /// Reject links in application-owned path components (including dangling links).

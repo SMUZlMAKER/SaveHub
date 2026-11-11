@@ -80,6 +80,28 @@ pub fn trusted_github_url(url: &str) -> bool {
     })
 }
 
+/// Require the selected directory itself to be the main worktree of a local clone.
+pub fn validate_repository_root(path: &Path) -> AdapterResult<()> {
+    let repo = Repository::open_ext(
+        path,
+        git2::RepositoryOpenFlags::NO_SEARCH,
+        std::iter::empty::<&Path>(),
+    )?;
+    if repo.is_bare()
+        || repo.is_worktree()
+        || repo
+            .workdir()
+            .ok_or_else(|| invalid("No working tree"))?
+            .canonicalize()?
+            != path.canonicalize()?
+    {
+        return Err(invalid(
+            "Выберите корень существующего локального Git-репозитория сохранений",
+        ));
+    }
+    Ok(())
+}
+
 /// Locate an already materialized tree without creating branches or worktrees.
 pub fn existing_worktree(root: &Path, branch: &str, key: &str) -> AdapterResult<Option<PathBuf>> {
     let repo = Repository::open(root)?;
@@ -354,6 +376,45 @@ pub fn set_remote(repo: &Path, name: &str, url: &str) -> AdapterResult<()> {
     Ok(())
 }
 
+/// Preserve the remote identity and its tracking refs. Reusing refs from another
+/// server can make unpublished saves look synchronized or merge unrelated data.
+pub fn ensure_remote(repo: &Path, name: &str, url: &str) -> AdapterResult<()> {
+    validate_remote(repo, name, url)?;
+    let repo = Repository::open(repo)?;
+    if repo.find_remote(name).is_err() {
+        repo.remote(name, url)?;
+    }
+    Ok(())
+}
+
+/// Read-only counterpart for validating settings before persisting them.
+pub fn validate_remote(repo: &Path, name: &str, url: &str) -> AdapterResult<()> {
+    let repo = Repository::open(repo)?;
+    match repo.find_remote(name) {
+        Ok(remote) => {
+            let same_repository = |existing: &str| {
+                existing == url
+                    || (trusted_github_url(existing)
+                        && trusted_github_url(url)
+                        && existing
+                            .strip_suffix(".git")
+                            .unwrap_or(existing)
+                            .eq_ignore_ascii_case(url.strip_suffix(".git").unwrap_or(url)))
+            };
+            let fetch_url = remote.url()?;
+            let push_url = remote.pushurl()?.unwrap_or(fetch_url);
+            if !same_repository(fetch_url) || !same_repository(push_url) {
+                return Err(invalid(
+                    "Адрес получения или отправки origin указывает на другой репозиторий. Верните прежний адрес или выберите отдельный локальный клон",
+                ));
+            }
+        }
+        Err(e) if e.code() == ErrorCode::NotFound => (),
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
 pub fn fetch(repo: &Path, remote: &str, token: &str) -> AdapterResult<()> {
     let repo = Repository::open(repo)?;
     let mut options = git2::FetchOptions::new();
@@ -396,6 +457,16 @@ pub fn list_branches(repo: &Path) -> AdapterResult<Vec<String>> {
     }
     names.sort();
     Ok(names)
+}
+
+/// The symbolic HEAD also reserves a branch name before its first commit.
+pub fn head_branch(repo: &Path) -> AdapterResult<Option<String>> {
+    let repo = Repository::open(repo)?;
+    Ok(repo
+        .find_reference("HEAD")?
+        .symbolic_target()?
+        .and_then(|name| name.strip_prefix("refs/heads/"))
+        .map(str::to_owned))
 }
 
 /// Cached remote branch names, without the remote prefix. Does not access the network.
@@ -1009,6 +1080,84 @@ fn resolve_contents(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ensuring_origin_checks_push_url_without_changing_configuration_or_refs() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo("local");
+        let expected = "https://github.com/test/expected";
+        let unexpected = "https://github.com/test/other";
+        let repository = Repository::open(&root).unwrap();
+        repository.remote("origin", expected).unwrap();
+        repository
+            .remote_set_pushurl("origin", Some(unexpected))
+            .unwrap();
+        let tip = commit_files(&root, None, &[], "initial").unwrap();
+        repository
+            .reference(
+                "refs/remotes/origin/main",
+                git2::Oid::from_str(&tip).unwrap(),
+                false,
+                "fixture",
+            )
+            .unwrap();
+        let config_before = std::fs::read(repository.path().join("config")).unwrap();
+        assert!(validate_remote(&root, "origin", expected).is_err());
+        assert!(ensure_remote(&root, "origin", expected).is_err());
+        assert_eq!(
+            std::fs::read(repository.path().join("config")).unwrap(),
+            config_before
+        );
+        assert_eq!(remote_head(&root, "main").unwrap(), Some(tip));
+
+        for equivalent in [expected, "https://github.com/TEST/expected.git"] {
+            repository
+                .remote_set_pushurl("origin", Some(equivalent))
+                .unwrap();
+            let config_before = std::fs::read(repository.path().join("config")).unwrap();
+            validate_remote(&root, "origin", expected).unwrap();
+            ensure_remote(&root, "origin", expected).unwrap();
+            assert_eq!(
+                std::fs::read(repository.path().join("config")).unwrap(),
+                config_before
+            );
+        }
+    }
+
+    #[test]
+    fn ensuring_origin_never_reassigns_existing_tracking_refs() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo("local");
+        let original = "https://github.com/test/original";
+        validate_remote(&root, "origin", original).unwrap();
+        assert!(
+            Repository::open(&root)
+                .unwrap()
+                .find_remote("origin")
+                .is_err()
+        );
+        ensure_remote(&root, "origin", original).unwrap();
+        let tip = commit_files(&root, None, &[], "initial").unwrap();
+        let repository = Repository::open(&root).unwrap();
+        repository
+            .reference(
+                "refs/remotes/origin/main",
+                git2::Oid::from_str(&tip).unwrap(),
+                false,
+                "fixture",
+            )
+            .unwrap();
+        assert!(ensure_remote(&root, "origin", "https://github.com/test/other").is_err());
+        assert_eq!(
+            repository.find_remote("origin").unwrap().url().unwrap(),
+            original
+        );
+        assert_eq!(remote_head(&root, "main").unwrap(), Some(tip));
+        ensure_remote(&root, "origin", "https://github.com/TEST/original.git").unwrap();
+        assert!(
+            ensure_remote(&root, "origin", "https://github.com/test/original.git.git").is_err()
+        );
+    }
 
     struct Sandbox(PathBuf);
     impl Sandbox {

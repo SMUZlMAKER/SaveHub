@@ -3,6 +3,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { createSubscription, type Subscription } from "./subscription";
 import type {
   ApiErrorKind,
   AppFeatures,
@@ -171,12 +172,12 @@ export const events = {
 export function subscribe<T = unknown>(
   event: string,
   handler: (payload: T) => void,
-): () => void {
-  const unlisten = listen<T>(event, (e) => handler(e.payload)).catch((e) => {
-    console.error(`Не удалось подписаться на событие ${event}`, e);
-    return null;
-  });
-  return () => {
-    unlisten.then((stop) => stop?.());
-  };
+  initialRead?: () => void,
+): Subscription {
+  return createSubscription<T>(
+    (handler) => listen<T>(event, (e) => handler(e.payload)),
+    handler,
+    initialRead,
+    (error) => console.error(`Не удалось подписаться на событие ${event}`, error),
+  );
 }

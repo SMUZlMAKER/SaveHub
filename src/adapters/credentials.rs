@@ -1,5 +1,6 @@
 use super::{AdapterError, AdapterResult};
 
+#[cfg(windows)]
 const TARGET: &str = "SaveHub/github-token";
 
 /// Прочитать токен только для использования внутри бэкенда.

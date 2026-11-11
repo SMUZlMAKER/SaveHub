@@ -18,6 +18,7 @@ impl Fixture {
         let directory =
             std::env::temp_dir().join(format!("savehub-settings-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
+        git2::Repository::init(directory.join("saves")).unwrap();
         Self {
             directory,
             operations: Arc::new(Mutex::new(())),
@@ -65,8 +66,8 @@ fn failed_save_preserves_the_entire_in_memory_configuration() {
         fixture
             .service()
             .update(|data| {
-                data.repo_url = Some("new-repo".into());
-                data.local_repo_path = Some("new-path".into());
+                data.repo_url = Some("https://github.com/test/saves".into());
+                data.local_repo_path = Some(fixture.directory.join("saves"));
                 data.sync_after_session = true;
             })
             .is_err()
@@ -81,13 +82,17 @@ fn failed_save_preserves_the_entire_in_memory_configuration() {
 fn repository_change_waits_for_the_current_operation() {
     let fixture = Fixture::new();
     let service = fixture.service();
+    let repository_path = fixture.directory.join("saves");
     let guard = fixture.operations.lock().unwrap();
     let (started, start) = mpsc::channel();
     let (finished, finish) = mpsc::channel();
     let writer = thread::spawn(move || {
         started.send(()).unwrap();
         finished
-            .send(service.set_repository(Some("new-repo".into()), Some("saves".into())))
+            .send(service.set_repository(
+                Some("https://github.com/test/saves".into()),
+                Some(repository_path),
+            ))
             .unwrap();
     });
 
@@ -102,7 +107,7 @@ fn repository_change_waits_for_the_current_operation() {
     writer.join().unwrap();
     assert_eq!(
         fixture.settings.data().repo_url.as_deref(),
-        Some("new-repo")
+        Some("https://github.com/test/saves")
     );
 }
 

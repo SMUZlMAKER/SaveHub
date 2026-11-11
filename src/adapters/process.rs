@@ -231,10 +231,19 @@ mod tests {
         assert_eq!(quote_argument("a\"b"), "\"a\\\"b\"");
         assert_eq!(quote_argument("C:\\Games\\"), "\"C:\\Games\\\\\"");
     }
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn lists_current_process() {
         let list = list().unwrap();
         assert!(list.iter().any(|p| p.pid == std::process::id()));
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    #[test]
+    fn process_listing_reports_unsupported_platform() {
+        assert!(matches!(
+            list(),
+            Err(super::super::AdapterError::UnsupportedPlatform)
+        ));
     }
     #[cfg(windows)]
     #[test]

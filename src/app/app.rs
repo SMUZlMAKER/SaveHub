@@ -190,11 +190,10 @@ pub fn start() {
                 .map_err(|error| std::io::Error::other(format!("{error:?}")))?
                 .with_save_operations(operations.clone()),
             );
-            let repo_service = Arc::new(RepoService::new(
-                catalog.clone(),
-                runtime.clone(),
-                settings.clone(),
-            ));
+            let repo_service = Arc::new(
+                RepoService::new(catalog.clone(), runtime.clone(), settings.clone())
+                    .persistent(data_dir.clone()),
+            );
             let profile_service = Arc::new(
                 ProfileService::with_operations(
                     catalog.clone(),

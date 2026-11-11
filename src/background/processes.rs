@@ -11,7 +11,7 @@ use tauri::{Emitter, Manager};
 pub fn spawn(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let processes = app.state::<Arc<ProcessService>>().inner().clone();
-        let mut failed = false;
+        let mut previous_poll = None;
         loop {
             let mut saves_changed = false;
             let update = {
@@ -50,7 +50,7 @@ pub fn spawn(app: tauri::AppHandle) {
             };
             match update {
                 Ok(changes) => {
-                    if failed {
+                    if publish_poll_state(previous_poll, true) {
                         let _ = app.emit(events::GAMES_CHANGED, ());
                         app.state::<Launches>().monitor_status(&app, None);
                         let running = processes.running_games().unwrap_or_default();
@@ -71,7 +71,7 @@ pub fn spawn(app: tauri::AppHandle) {
                             );
                         }
                     }
-                    failed = false;
+                    previous_poll = Some(true);
                     // Reconcile even if a very short-lived child exited before the
                     // launch command finished publishing its status.
                     let launches = app.state::<Launches>();
@@ -113,7 +113,7 @@ pub fn spawn(app: tauri::AppHandle) {
                     }
                 }
                 Err(error) => {
-                    if !failed {
+                    if publish_poll_state(previous_poll, false) {
                         app.state::<Launches>().monitor_status(
                             &app,
                             Some(format!("Не удалось опросить процессы: {error:?}")),
@@ -131,11 +131,31 @@ pub fn spawn(app: tauri::AppHandle) {
                         }
                         let _ = app.emit(events::GAMES_CHANGED, ());
                     }
-                    failed = true;
+                    previous_poll = Some(false);
                 }
             }
             crate::app::tray::refresh_sync_status(&app);
             std::thread::sleep(Duration::from_secs(2));
         }
     });
+}
+
+// Both the initial result and transitions must reach UI; unchanged polls stay quiet.
+fn publish_poll_state(previous: Option<bool>, success: bool) -> bool {
+    previous != Some(success)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::publish_poll_state;
+
+    #[test]
+    fn publishes_initial_results_and_recovery_without_repeating_stable_polls() {
+        assert!(publish_poll_state(None, true));
+        assert!(publish_poll_state(None, false));
+        assert!(publish_poll_state(Some(false), true));
+        assert!(publish_poll_state(Some(true), false));
+        assert!(!publish_poll_state(Some(true), true));
+        assert!(!publish_poll_state(Some(false), false));
+    }
 }
