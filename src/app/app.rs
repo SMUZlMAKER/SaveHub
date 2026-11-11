@@ -209,7 +209,10 @@ pub fn start() {
             shutdown_for_setup.store(false, Ordering::Release);
 
             crate::background::updates::spawn(app.handle().clone());
-            crate::background::catalog::spawn(app.handle().clone(), game_service);
+            app.manage(crate::background::catalog::spawn(
+                app.handle().clone(),
+                game_service,
+            ));
             let args: Vec<String> = std::env::args().collect();
             if args.iter().any(|arg| arg == "--launch-game") {
                 crate::app::launch::handle_arguments(app.handle().clone(), args);

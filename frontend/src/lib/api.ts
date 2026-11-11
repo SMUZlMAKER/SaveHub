@@ -157,6 +157,7 @@ export const events = {
   launchStatusChanged: 'launch-status-changed',
   gameProcessChanged: 'game-process-changed',
   gamesChanged: "games-changed",
+  catalogStatusChanged: "catalog-status-changed",
   profileChanged: "profile-changed",
   savesChanged: "saves-changed",
   syncStatusChanged: "sync-status-changed",

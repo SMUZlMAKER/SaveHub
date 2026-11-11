@@ -23,6 +23,7 @@ impl Fixture {
             operations: Arc::new(Mutex::new(())),
             settings: Arc::new(Settings::new(
                 SettingsData {
+                    catalog_repo_url: None,
                     repo_url: None,
                     local_repo_path: None,
                     sync_after_session: false,

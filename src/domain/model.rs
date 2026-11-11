@@ -89,7 +89,7 @@ pub enum ConflictResolution {
     CreateProfile { name: String },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncState {
     NotConfigured,
     Idle,
@@ -97,7 +97,7 @@ pub enum SyncState {
     Error,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncStatus {
     pub state: SyncState,
     pub last_sync_at: Option<u64>,

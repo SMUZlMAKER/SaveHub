@@ -252,10 +252,6 @@ impl Settings {
         inner.data.clone()
     }
 
-    pub fn replace_data(&self, data: SettingsData) {
-        self.inner.write().expect("Settings lock poisoned").data = data;
-    }
-
     pub fn set_repository(&self, url: Option<String>, path: Option<PathBuf>) {
         let mut inner = self.inner.write().expect("Settings lock poisoned");
         inner.set_repository(url, path);

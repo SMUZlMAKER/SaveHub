@@ -3,6 +3,8 @@
 
 /// Изменился список игр или их статус (нашелся путь, игра запустилась или закрылась).
 pub const GAMES_CHANGED: &str = "games-changed";
+/// Состояние синхронизации каталога; не требует перечитывать список игр.
+pub const CATALOG_STATUS_CHANGED: &str = "catalog-status-changed";
 /// Сменился активный профиль (в том числе из трея) или список профилей.
 pub const PROFILE_CHANGED: &str = "profile-changed";
 /// Появились новые сохранения.

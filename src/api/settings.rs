@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tauri::State;
 
 use super::{ApiError, ApiResult};
-use crate::background::repo::RepoWorkerHandle;
-use crate::services::settings::SettingsService;
+use crate::background::{catalog::CatalogWorker, repo::RepoWorkerHandle};
+use crate::services::{game::GameService, settings::SettingsService};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,7 +49,12 @@ pub async fn update_settings(
     settings: SettingsDto,
     service: State<'_, Arc<SettingsService>>,
     worker: State<'_, RepoWorkerHandle>,
+    catalog_worker: State<'_, CatalogWorker>,
+    games: State<'_, Arc<GameService>>,
+    app: tauri::AppHandle,
 ) -> ApiResult<()> {
+    let previous_url = service.get()?.catalog_repo_url;
+    let updated_service = service.inner().clone();
     let service = service.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         service.update(|data| {
@@ -65,6 +70,11 @@ pub async fn update_settings(
     .await
     .map_err(|error| ApiError::Internal(error.to_string()))??;
     let _ = worker.wake();
+    if previous_url != updated_service.get()?.catalog_repo_url {
+        games.mark_sync_pending();
+        crate::app::catalog::notify_status(&app);
+        catalog_worker.request_sync();
+    }
     Ok(())
 }
 
@@ -74,8 +84,14 @@ pub fn set_github_token(
     token: String,
     service: State<'_, Arc<SettingsService>>,
     worker: State<'_, RepoWorkerHandle>,
+    catalog_worker: State<'_, CatalogWorker>,
+    games: State<'_, Arc<GameService>>,
+    app: tauri::AppHandle,
 ) -> ApiResult<()> {
     service.set_github_token(token.trim())?;
     let _ = worker.wake();
+    games.mark_sync_pending();
+    crate::app::catalog::notify_status(&app);
+    catalog_worker.request_sync();
     Ok(())
 }

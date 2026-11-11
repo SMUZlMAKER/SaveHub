@@ -6,7 +6,10 @@ use crate::{
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 pub struct GameService {
@@ -17,6 +20,7 @@ pub struct GameService {
     token_for_url: fn(&str) -> ServiceResult<String>,
     operation: Mutex<()>,
     sync_status: Mutex<SyncStatus>,
+    revision: AtomicU64,
 }
 
 impl GameService {
@@ -29,6 +33,7 @@ impl GameService {
             storage: None,
             token_for_url: Self::catalog_token,
             operation: Mutex::new(()),
+            revision: AtomicU64::new(0),
             sync_status: Mutex::new(SyncStatus {
                 state: SyncState::NotConfigured,
                 last_sync_at: None,
@@ -77,11 +82,76 @@ impl GameService {
             .ok_or_else(|| ServiceError::NotFound(format!("Игра не найдена: {game_id}")))
     }
 
+    /// Import a legacy shortcut only if the persistent catalogue has no newer entry.
+    /// Keep its UUID so existing desktop shortcuts continue to address the same game.
+    pub fn restore_launcher_registration(
+        &self,
+        game_id: GameId,
+        registrations: &std::path::Path,
+    ) -> ServiceResult<()> {
+        if self.catalog.games().contains_key(&game_id) {
+            return Ok(());
+        }
+        self.mutate(|games| {
+            if games.contains_key(&game_id) {
+                return Ok(());
+            }
+            let saved = config::read_games(&registrations.join(format!("{game_id}.json")))
+                .map_err(ServiceError::Adapter)?
+                .ok_or_else(|| {
+                    ServiceError::NotFound(
+                        "Регистрация ярлыка не найдена. Создайте ярлык заново в SaveHub".into(),
+                    )
+                })?;
+            let game = saved
+                .into_iter()
+                .find(|game| game.id == game_id)
+                .ok_or_else(|| {
+                    ServiceError::InvalidInput("Некорректная регистрация ярлыка".into())
+                })?;
+            Self::validate_game(&game)?;
+            games.insert(game_id, game);
+            Ok(())
+        })
+    }
+
     pub fn status(&self) -> SyncStatus {
         self.sync_status
             .lock()
             .expect("Catalogue status lock poisoned")
             .clone()
+    }
+
+    /// Monotonic notification counter; failures without accepted changes leave it unchanged.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Relaxed)
+    }
+
+    fn replace_games(&self, games: HashMap<GameId, Game>) {
+        if self.catalog.games() != games {
+            self.catalog.replace_games(games);
+            self.revision.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn replace_local(&self, local: LocalConfig) {
+        if self.settings.local() != local {
+            self.settings.replace_local(local);
+            self.revision.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn mark_sync_pending(&self) {
+        let mut status = self
+            .sync_status
+            .lock()
+            .expect("Catalogue status lock poisoned");
+        status.state = if self.settings.data().catalog_repo_url.is_some() {
+            SyncState::Syncing
+        } else {
+            SyncState::NotConfigured
+        };
+        status.error = None;
     }
 
     fn report(&self, result: &ServiceResult<()>) {
@@ -171,7 +241,7 @@ impl GameService {
             .operation
             .lock()
             .expect("Catalogue operation lock poisoned");
-        self.catalog.replace_games(self.read_local()?);
+        self.replace_games(self.read_local()?);
         Ok(())
     }
 
@@ -200,14 +270,14 @@ impl GameService {
                 return Err(ServiceError::Adapter(error));
             }
             Err(config::RegistrationWriteError::LocalOnly { write, rollback }) => {
-                self.settings.replace_local(local);
+                self.replace_local(local);
                 return Err(ServiceError::Conflict(format!(
                     "Сохранены только локальные пути. Общий каталог не изменён и не отправлен. Не удалось восстановить прежние локальные пути: запись {write:?}, восстановление {rollback:?}"
                 )));
             }
         }
-        self.settings.replace_local(local);
-        self.catalog.replace_games(games);
+        self.replace_local(local);
+        self.replace_games(games);
         if shared_changed {
             // Both configs are accepted. Failed commit/push is reported separately;
             // retrying the publication must not repeat a successful add.
@@ -233,7 +303,7 @@ impl GameService {
 
     fn sync_locked(&self) -> ServiceResult<()> {
         let root = self.root()?;
-        self.catalog.replace_games(self.read_local()?);
+        self.replace_games(self.read_local()?);
         catalog_git::checkpoint(&root).map_err(ServiceError::Adapter)?;
         let Some(url) = self.settings.data().catalog_repo_url else {
             return Ok(());
@@ -283,7 +353,7 @@ impl GameService {
             ) {
                 return Err(ServiceError::Conflict("Каталог изменён на двух ПК. Обе версии сохранены в Git; требуется объединить games.json в ветке main и повторить синхронизацию".into()));
             }
-            self.catalog.replace_games(self.read_local()?);
+            self.replace_games(self.read_local()?);
         }
         if config::read_games(&root.join(catalog_git::FILE))
             .map_err(ServiceError::Adapter)?
@@ -312,7 +382,7 @@ impl GameService {
             self.report(&result);
         }
         let mut games = self.read_local()?;
-        self.catalog.replace_games(games.clone());
+        self.replace_games(games.clone());
         let mut local = self.settings.local();
         change(&mut games, &mut local)?;
         self.save(games, local)
@@ -367,7 +437,9 @@ impl GameService {
             paths,
             process_names,
         };
+        self.ensure_editable(id)?;
         self.mutate(|games| {
+            self.ensure_editable(id)?;
             if !games.contains_key(&id) {
                 return Err(ServiceError::NotFound("Игра не найдена".into()));
             }
@@ -379,7 +451,9 @@ impl GameService {
 
     /// Removes only registration, never save data.
     pub fn delete(&self, id: GameId) -> ServiceResult<()> {
+        self.ensure_editable(id)?;
         self.mutate(|games| {
+            self.ensure_editable(id)?;
             games
                 .remove(&id)
                 .ok_or_else(|| ServiceError::NotFound("Игра не найдена".into()))?;
@@ -401,6 +475,7 @@ impl GameService {
         resolution: Option<PathResolution>,
     ) -> ServiceResult<()> {
         self.edit(false, |games, local| {
+            self.ensure_editable(id)?;
             if !games.contains_key(&id) {
                 return Err(ServiceError::NotFound("Игра не найдена".into()));
             }
@@ -520,14 +595,13 @@ impl GameService {
     }
 
     fn ensure_editable(&self, id: GameId) -> ServiceResult<()> {
-        if self
+        let games = self
             .runtime
             .running_games()
-            .is_some_and(|games| games.contains(&id))
-        {
+            .ok_or(ServiceError::ProcessesUnknown)?;
+        if games.contains(&id) {
             return Err(ServiceError::GameRunning(vec![id]));
         }
-        // Unknown process state permits registration only, never save-file operations.
         Ok(())
     }
 
@@ -570,7 +644,7 @@ mod tests {
                     machine_id: name.into(),
                     games: HashMap::new(),
                 });
-            GameService::persistent(
+            let service = GameService::persistent(
                 Arc::new(Catalog::new(HashMap::new(), HashMap::new())),
                 Arc::new(RuntimeState::new(
                     None,
@@ -596,7 +670,9 @@ mod tests {
                 )),
                 data,
             )
-            .unwrap()
+            .unwrap();
+            service.runtime.set_running_games(vec![]);
+            service
         }
         fn remote(&self) -> PathBuf {
             let path = self.0.join("remote.git");
@@ -934,6 +1010,117 @@ mod tests {
             remote_repo.head().unwrap().target().unwrap().to_string(),
             head
         );
+    }
+
+    #[test]
+    fn unknown_or_running_processes_block_edits_but_not_initial_registration() {
+        let fixture = Fixture::new();
+        let service = fixture.service("pc");
+        service.runtime.invalidate_process_state();
+        let paths = valid_local_paths(&fixture);
+        let game = service.add_with_paths("Registered", paths.clone()).unwrap();
+        let revision = service.revision();
+        let head = git::head(&service.root().unwrap()).unwrap();
+        let attempts = || {
+            vec![
+                service
+                    .update_with_paths(game.id, "Changed", paths.clone())
+                    .map(|_| ()),
+                service
+                    .update_shared_paths(game.id, paths.clone())
+                    .map(|_| ()),
+                service.use_local_paths(game.id, paths.clone()).map(|_| ()),
+                service.ignore_on_this_pc(game.id).map(|_| ()),
+                service
+                    .update(game.id, "Changed", paths.clone(), vec![])
+                    .map(|_| ()),
+                service.clear_local_resolution(game.id),
+                service.delete(game.id),
+            ]
+        };
+        assert!(
+            attempts()
+                .iter()
+                .all(|r| matches!(r, Err(ServiceError::ProcessesUnknown)))
+        );
+        service.runtime.set_running_games(vec![game.id]);
+        assert!(
+            attempts()
+                .iter()
+                .all(|r| matches!(r, Err(ServiceError::GameRunning(ids)) if ids == &vec![game.id]))
+        );
+        assert_eq!(service.revision(), revision);
+        assert_eq!(git::head(&service.root().unwrap()).unwrap(), head);
+        assert_eq!(service.get(game.id).unwrap(), game);
+        service.runtime.set_running_games(vec![]);
+        service
+            .update_with_paths(game.id, "Allowed", paths)
+            .unwrap();
+        assert_eq!(service.get(game.id).unwrap().name, "Allowed");
+        assert!(service.revision() > revision);
+    }
+
+    #[test]
+    fn failed_sync_without_data_changes_keeps_notification_revision() {
+        let fixture = Fixture::new();
+        let mut service = fixture.service("pc");
+        set_test_remote(&mut service, &fixture.0.join("missing.git"));
+        let revision = service.revision();
+        assert!(service.sync_catalog().is_err());
+        assert_eq!(service.revision(), revision);
+        assert!(matches!(service.status().state, SyncState::Error));
+    }
+
+    #[test]
+    fn accepted_remote_data_is_notified_even_when_push_fails() {
+        let fixture = Fixture::new();
+        let source = fixture.service("source");
+        let game = add(&source, "Remote");
+        let mut receiver = fixture.service("receiver");
+        // libgit2 fetches from a local working repo but refuses to push to it.
+        set_test_remote(&mut receiver, &source.root().unwrap());
+        let revision = receiver.revision();
+        assert!(receiver.sync_catalog().is_err());
+        assert_eq!(receiver.get(game.id).unwrap(), game);
+        assert!(receiver.revision() > revision);
+        assert!(matches!(receiver.status().state, SyncState::Error));
+    }
+
+    #[test]
+    fn legacy_shortcut_import_survives_reload_without_overwriting_newer_catalogue() {
+        let fixture = Fixture::new();
+        let service = fixture.service("pc");
+        let registrations = fixture.0.join("launchers");
+        let game = Game {
+            id: uuid::Uuid::new_v4(),
+            name: "Legacy shortcut".into(),
+            paths: valid_local_paths(&fixture),
+            process_names: vec!["game.exe".into()],
+        };
+        config::write_games(
+            &registrations.join(format!("{}.json", game.id)),
+            std::slice::from_ref(&game),
+        )
+        .unwrap();
+        service
+            .restore_launcher_registration(game.id, &registrations)
+            .unwrap();
+        service.reload_catalog().unwrap();
+        assert_eq!(service.get(game.id).unwrap(), game);
+        service
+            .update_with_paths(game.id, "Newer catalogue", game.paths.clone())
+            .unwrap();
+        drop(service);
+        let restarted = fixture.service("pc");
+        restarted
+            .restore_launcher_registration(game.id, &registrations)
+            .unwrap();
+        assert_eq!(restarted.get(game.id).unwrap().name, "Newer catalogue");
+        assert_eq!(restarted.list().unwrap().len(), 1);
+        assert!(matches!(
+            restarted.restore_launcher_registration(uuid::Uuid::new_v4(), &registrations),
+            Err(ServiceError::NotFound(_))
+        ));
     }
 
     #[test]
