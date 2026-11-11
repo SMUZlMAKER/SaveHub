@@ -10,50 +10,56 @@
   import Loadable from '../lib/components/Loadable.svelte'
 
   type Side = 'local' | 'remote'
-  type Choice = { side: Side; keepBoth: boolean }
+  type Choice = { side: Side }
 
   let conflicts = $state<Conflict[]>([])
   let loading = $state(true)
   let loadError = $state<string | null>(null)
   let choices = $state<Record<string, Choice>>({})
 
+  let generation = 0
+  let applying = $state(false)
+
   async function load() {
+    const current = ++generation
     try {
-      conflicts = await api.listConflicts()
+      const result = await api.listConflicts()
+      if (current !== generation) return
+      conflicts = result
       for (const c of conflicts) {
         // По умолчанию — более свежая версия
         choices[c.id] ??= {
           side: c.local.modifiedAt >= c.remote.modifiedAt ? 'local' : 'remote',
-          keepBoth: true,
         }
       }
       loadError = null
     } catch (e) {
-      loadError = describeError(e)
+      if (current === generation) loadError = describeError(e)
     } finally {
-      loading = false
+      if (current === generation) loading = false
     }
   }
 
-  function resolution({ side, keepBoth }: Choice): ConflictResolution {
-    if (keepBoth) return side === 'local' ? 'keepBothLocalFirst' : 'keepBothRemoteFirst'
+  function resolution({ side }: Choice): ConflictResolution {
     return side === 'local' ? 'keepLocal' : 'keepRemote'
   }
 
   async function apply(conflict: Conflict) {
+    if (applying) return
+    applying = true
     try {
       await api.resolveConflict(conflict.id, resolution(choices[conflict.id]))
       notice.show(`${conflict.gameName}: конфликт решён`)
       await load()
     } catch (e) {
       notice.error(e)
-    }
+    } finally { applying = false }
   }
 
   onMount(() => {
     if (!features.conflicts) return
-    load()
-    return subscribe(events.conflictsChanged, load)
+    const stop = subscribe(events.conflictsChanged, load, load)
+    return () => { generation++; stop() }
   })
 </script>
 
@@ -61,6 +67,7 @@
   <button
     type="button"
     class="version"
+    disabled={applying}
     class:selected={choices[conflict.id]?.side === side}
     onclick={() => (choices[conflict.id].side = side)}
   >
@@ -83,12 +90,9 @@
         {@render version(conflict, 'local', conflict.local)}
         {@render version(conflict, 'remote', conflict.remote)}
       </div>
-      <label class="toggle">
-        <span>Сохранить вторую версию отдельным сохранением</span>
-        <input type="checkbox" bind:checked={choices[conflict.id].keepBoth} />
-      </label>
+      <p class="muted">Обе версии сохраняются в технической резервной копии репозитория. Они не появятся отдельными записями в истории сохранений.</p>
       <div class="actions">
-        <button class="primary" onclick={() => apply(conflict)}>Применить</button>
+        <button class="primary" disabled={applying} onclick={() => apply(conflict)}>{applying ? 'Применяем…' : 'Применить'}</button>
       </div>
     </section>
   {:else}

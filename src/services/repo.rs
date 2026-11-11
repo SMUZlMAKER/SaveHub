@@ -20,6 +20,7 @@ pub struct RepoService {
     settings: Arc<Settings>,
     operations: Mutex<()>,
     catalog_baseline: Mutex<Option<serde_json::Value>>,
+    persistence: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -142,6 +143,7 @@ impl RepoService {
             })?;
         let profiles = self.catalog.profiles();
         let mut branches = git::list_branches(&root).map_err(ServiceError::Adapter)?;
+        branches.extend(git::head_branch(&root).map_err(ServiceError::Adapter)?);
         branches.extend(git::list_remote_branches(&root, "origin").map_err(ServiceError::Adapter)?);
         branches.extend(profiles.values().map(|profile| profile.branch.clone()));
         // A ref foo/bar also reserves foo: Git cannot store both namespaces.
@@ -157,6 +159,16 @@ impl RepoService {
             .map_err(ServiceError::Adapter)?;
         git::create_branch(&root, &branch, &commit).map_err(ServiceError::Adapter)?;
         Ok(branch)
+    }
+
+    pub(crate) fn rollback_created_profile(&self, profile: &Profile) -> ServiceResult<()> {
+        let _guard = self.lock()?;
+        let root = self.settings.data().local_repo_path.ok_or_else(|| {
+            ServiceError::InvalidInput("Не настроен локальный репозиторий".into())
+        })?;
+        git::archive_profile_branch(&root, &profile.branch, &profile.id.to_string())
+            .map_err(ServiceError::Adapter)?;
+        Ok(())
     }
 
     /// Архивировать локальные данные профиля и удалить его ветку и worktree.
@@ -235,7 +247,12 @@ impl RepoService {
             settings,
             operations: Mutex::new(()),
             catalog_baseline: Mutex::new(None),
+            persistence: None,
         }
+    }
+    pub fn persistent(mut self, directory: PathBuf) -> Self {
+        self.persistence = Some(directory);
+        self
     }
     pub fn configuration(&self) -> Option<RepositoryConfig> {
         let settings = self.settings.data();
@@ -286,7 +303,7 @@ impl RepoService {
             ..previous.clone()
         });
         let result = (|| {
-            git::set_remote(&path, "origin", &url).map_err(ServiceError::Adapter)?;
+            git::ensure_remote(&path, "origin", &url).map_err(ServiceError::Adapter)?;
             operation(&path, &token)
         })();
         self.runtime.set_sync_status(match &result {
@@ -624,12 +641,28 @@ impl RepoService {
             let (root, _) = self.repository()?;
             let remote = git::merge_head(&path).map_err(ServiceError::Adapter)?;
             git::create_branch(&root, &branch, &remote).map_err(ServiceError::Adapter)?;
-            self.catalog.add_profile(Profile {
+            let new_profile = Profile {
                 id,
                 name: name.trim().into(),
                 branch,
                 last_played_game: None,
-            });
+            };
+            if let Some(directory) = &self.persistence {
+                let mut profiles: Vec<_> = self.catalog.profiles().into_values().collect();
+                profiles.push(new_profile.clone());
+                if let Err(error) =
+                    config::write_profiles(&directory.join("profiles.json"), &profiles)
+                {
+                    git::archive_profile_branch(&root, &new_profile.branch, &id.to_string())
+                        .map_err(|rollback| {
+                            ServiceError::Conflict(format!(
+                                "Запись профиля: {error:?}; удаление новой ветки: {rollback:?}"
+                            ))
+                        })?;
+                    return Err(ServiceError::Adapter(error));
+                }
+            }
+            self.catalog.add_profile(new_profile);
             // The new branch preserves the complete remote profile; the original keeps local files.
         }
         if remote_first {
@@ -1093,7 +1126,9 @@ mod tests {
 
     #[test]
     fn conflict_can_create_an_independent_remote_profile() {
-        let fixture = Fixture::new();
+        let mut fixture = Fixture::new();
+        let state = fixture.dir.join("state");
+        fixture.service.persistence = Some(state.clone());
         let conflicts = fixture.conflict();
         fixture
             .service
@@ -1110,6 +1145,14 @@ mod tests {
             .find(|p| p.id != fixture.profile.id)
             .unwrap();
         assert_eq!(new.name, "Remote copy");
+        let stored = config::read_profiles(&state.join("profiles.json"))
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored
+                .iter()
+                .any(|p| p.id == new.id && p.branch == new.branch)
+        );
         let new_tree = fixture.service.tree(new).unwrap();
         assert_eq!(
             fs::read(&new_tree.join(fixture.save_path())).unwrap(),
@@ -1119,6 +1162,30 @@ mod tests {
             fs::read(&fixture.tree().join(fixture.save_path())).unwrap(),
             b"local\n"
         );
+    }
+
+    #[test]
+    fn failed_conflict_profile_persistence_keeps_conflict_and_no_new_branch() {
+        let mut fixture = Fixture::new();
+        let state = fixture.dir.join("state");
+        std::fs::create_dir_all(state.join("profiles.json")).unwrap();
+        fixture.service.persistence = Some(state);
+        let conflicts = fixture.conflict();
+        let before = git::list_branches(&fixture.root).unwrap();
+        assert!(
+            fixture
+                .service
+                .resolve_conflict(
+                    &conflicts[0].id,
+                    ConflictResolution::CreateProfile {
+                        name: "Remote copy".into()
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(git::list_branches(&fixture.root).unwrap(), before);
+        assert_eq!(fixture.service.catalog.profiles().len(), 1);
+        assert_eq!(fixture.service.list_conflicts().unwrap().len(), 1);
     }
 
     #[test]

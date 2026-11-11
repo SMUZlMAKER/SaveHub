@@ -86,6 +86,13 @@ impl ProfileService {
         self.catalog.add_profile(profile.clone());
         if let Err(error) = self.persist() {
             self.catalog.remove_profile(&profile.id);
+            self.repo
+                .rollback_created_profile(&profile)
+                .map_err(|rollback| {
+                    ServiceError::Conflict(format!(
+                        "Запись профиля: {error:?}; откат новой ветки: {rollback:?}"
+                    ))
+                })?;
             return Err(error);
         }
         Ok(profile)
@@ -237,6 +244,35 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn creation_does_not_claim_an_unborn_main_worktree_branch() {
+        let fixture = Fixture::new();
+        let repository = git2::Repository::open(&fixture.root).unwrap();
+        repository.set_head("refs/heads/master").unwrap();
+        let profile = fixture.service.create("Master").unwrap();
+        assert_eq!(profile.branch, "master-2");
+        assert!(repository.head().is_err());
+        fixture.service.runtime.set_running_games(Vec::new());
+        fixture.service.delete(&profile.id).unwrap();
+    }
+
+    #[test]
+    fn failed_profile_persistence_rolls_back_branch_and_retry_reuses_name() {
+        let mut fixture = Fixture::new();
+        let directory = fixture.root.join("local-state");
+        std::fs::create_dir_all(directory.join("profiles.json")).unwrap();
+        fixture.service.persistence = Some(directory.clone());
+        assert!(fixture.service.create("Retry").is_err());
+        assert!(fixture.service.list().unwrap().is_empty());
+        assert!(
+            crate::adapters::git::list_branches(&fixture.root)
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir(directory.join("profiles.json")).unwrap();
+        assert_eq!(fixture.service.create("Retry").unwrap().branch, "retry");
     }
 
     #[test]

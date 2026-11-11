@@ -64,6 +64,10 @@ impl SwitchProfile {
             match self.games.check_paths(game.id)? {
                 crate::domain::GameAvailability::Ignored => (),
                 crate::domain::GameAvailability::Ready { .. } => games.push(game),
+                crate::domain::GameAvailability::Missing {
+                    save_dir_missing: true,
+                    exe_missing: false,
+                } if self.saves.is_bound(game.id, &current.id)? => games.push(game),
                 crate::domain::GameAvailability::Missing { .. } => {
                     return Err(crate::services::ServiceError::InvalidInput(format!(
                         "Укажите локальные пути игры {}",
@@ -297,6 +301,55 @@ mod tests {
             Err(crate::services::ServiceError::ProcessesUnknown)
         ));
         assert!(fs::read_symlink(&f.source).unwrap().is_none());
+        assert_eq!(f.runtime.active_profile(), Some(f.old));
+    }
+
+    #[test]
+    fn switch_repairs_missing_target_of_current_profile_link() {
+        let f = Fixture::new();
+        f.switch(f.old).unwrap();
+        let target = fs::canonicalize(&f.source).unwrap();
+        std::fs::remove_dir_all(&target).unwrap();
+        f.switch(f.new).unwrap();
+        assert!(target.is_dir());
+        assert!(f.source.is_dir());
+        assert_eq!(f.runtime.active_profile(), Some(f.new));
+    }
+
+    #[test]
+    fn switch_does_not_repair_links_without_exe_or_from_another_profile() {
+        let f = Fixture::new();
+        f.switch(f.old).unwrap();
+        let target = fs::canonicalize(&f.source).unwrap();
+        std::fs::remove_dir_all(&target).unwrap();
+        std::fs::remove_file(f.dir.join("game.exe")).unwrap();
+        assert!(f.switch(f.new).is_err());
+        assert!(!target.exists());
+        assert_eq!(f.runtime.active_profile(), Some(f.old));
+
+        let f = Fixture::new();
+        f.switch(f.new).unwrap();
+        let target = fs::canonicalize(&f.source).unwrap();
+        std::fs::remove_dir_all(&target).unwrap();
+        f.runtime.set_active_profile(Some(f.old)).unwrap();
+        assert!(f.switch(f.new).is_err());
+        assert!(!target.exists());
+        assert_eq!(f.runtime.active_profile(), Some(f.old));
+    }
+
+    #[test]
+    fn switch_rejects_missing_ordinary_directory_and_foreign_dangling_link() {
+        let f = Fixture::new();
+        std::fs::remove_dir_all(&f.source).unwrap();
+        assert!(f.switch(f.new).is_err());
+        assert!(!f.source.exists());
+        let foreign = f.dir.join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        fs::create_symlink(&f.source, &foreign).unwrap();
+        std::fs::remove_dir(&foreign).unwrap();
+        assert!(f.switch(f.new).is_err());
+        assert!(!foreign.exists());
+        assert!(fs::read_symlink(&f.source).unwrap().is_some());
         assert_eq!(f.runtime.active_profile(), Some(f.old));
     }
 }

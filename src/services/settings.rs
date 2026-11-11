@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 pub fn validate_catalog_url(url: &str) -> ServiceResult<()> {
     let path = url.strip_prefix("https://github.com/").ok_or_else(|| {
-        ServiceError::InvalidInput("Каталог: укажите HTTPS-адрес репозитория на github.com".into())
+        ServiceError::InvalidInput("Укажите HTTPS-адрес репозитория на github.com".into())
     })?;
     let parts: Vec<_> = path.split('/').collect();
     if parts.len() != 2
@@ -58,6 +58,30 @@ impl SettingsService {
             .map_err(|_| ServiceError::Conflict("Repository operations lock poisoned".into()))?;
         let mut data = self.settings.data();
         change(&mut data);
+        data.repo_url = data
+            .repo_url
+            .map(|url| url.trim().trim_end_matches('/').to_owned())
+            .filter(|url| !url.is_empty());
+        data.local_repo_path = data
+            .local_repo_path
+            .filter(|path| !path.as_os_str().is_empty());
+        if let Some(path) = &data.local_repo_path {
+            if !path.is_absolute() {
+                return Err(ServiceError::InvalidInput(
+                    "Укажите абсолютный путь репозитория".into(),
+                ));
+            }
+            crate::adapters::git::validate_repository_root(path).map_err(ServiceError::Adapter)?;
+        }
+        if let Some(url) = &data.repo_url {
+            validate_catalog_url(url)?;
+            if let Some(path) = &data.local_repo_path {
+                if path.join(".git").exists() {
+                    crate::adapters::git::validate_remote(path, "origin", url)
+                        .map_err(ServiceError::Adapter)?;
+                }
+            }
+        }
         data.catalog_repo_url = data
             .catalog_repo_url
             .map(|url| url.trim().trim_end_matches('/').to_owned())
@@ -193,6 +217,68 @@ mod catalog_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn invalid_or_nested_repository_path_does_not_change_settings() {
+        let fixture = Fixture::new();
+        let root = fixture.root.join("repo");
+        git2::Repository::init(&root).unwrap();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let before = std::fs::read(&fixture.service.path).unwrap();
+        for path in [fixture.root.join("missing"), nested, root.join(".git")] {
+            assert!(fixture.service.set_repository(None, Some(path)).is_err());
+            assert_eq!(std::fs::read(&fixture.service.path).unwrap(), before);
+            assert!(fixture.service.get().unwrap().local_repo_path.is_none());
+        }
+        fixture.service.set_repository(None, Some(root)).unwrap();
+    }
+
+    #[test]
+    fn empty_repository_fields_disable_network_and_remove_local_path() {
+        let fixture = Fixture::new();
+        fixture
+            .service
+            .set_repository(Some("  ".into()), Some(PathBuf::new()))
+            .unwrap();
+        let stored = config::read_settings(&fixture.service.path)
+            .unwrap()
+            .unwrap();
+        assert!(stored.repo_url.is_none());
+        assert!(stored.local_repo_path.is_none());
+        assert!(fixture.service.get().unwrap().repo_url.is_none());
+    }
+
+    #[test]
+    fn different_origin_is_rejected_before_saving_settings() {
+        let fixture = Fixture::new();
+        let root = fixture.root.join("saves");
+        let repository = git2::Repository::init(&root).unwrap();
+        let original = "https://github.com/test/original";
+        repository.remote("origin", original).unwrap();
+        let before = std::fs::read(&fixture.service.path).unwrap();
+        assert!(
+            fixture
+                .service
+                .set_repository(
+                    Some("https://github.com/test/other".into()),
+                    Some(root.clone())
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&fixture.service.path).unwrap(), before);
+        assert_eq!(
+            repository.find_remote("origin").unwrap().url().unwrap(),
+            original
+        );
+        fixture
+            .service
+            .set_repository(
+                Some(" https://github.com/test/original.git/ ".into()),
+                Some(root),
+            )
+            .unwrap();
     }
 
     #[test]

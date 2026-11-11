@@ -36,7 +36,7 @@
   }
 </script>
 
-{#if status && (status.phase === 'awaitingProfile' || status.error || status.monitorError)}
+{#if status && (['preparing', 'starting', 'awaitingProfile'].includes(status.phase) || status.error || status.monitorError)}
   <section class="card launch-panel" class:compact aria-label="Запуск игры" aria-live="polite">
     <h3>{status.gameName ?? 'Запуск через SaveHub'}</h3>
     {#if status.phase === 'preparing'}<p role="status">Подготавливаем запуск…</p>
@@ -49,7 +49,7 @@
           {/each}
         </select>
       </label>
-      <p class="muted">Переключение сохранений между профилями пока недоступно. Запуск возможен с текущим профилем.</p>
+      <p class="muted">Перед запуском SaveHub переключит сохранения на выбранный профиль. Для переключения закройте другие игры.</p>
       <div class="actions"><button class="primary" onclick={confirm} disabled={busy || !profileId}>{busy ? 'Запуск…' : 'Запустить игру'}</button><button onclick={cancel} disabled={busy}>Отмена</button></div>
     {:else if status.phase === 'running'}<p role="status">Игра запущена{status.pid ? ` · PID ${status.pid}` : ''}. {status.monitorError ? 'Состояние процесса временно неизвестно.' : 'SaveHub следит за процессом.'}</p>
     {:else if status.phase === 'stopped'}<p role="status">Процесс игры завершён.</p>

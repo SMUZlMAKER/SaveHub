@@ -133,13 +133,9 @@ impl SaveService {
     }
 
     fn validate_link(&self, game: GameId, source: &std::path::Path) -> ServiceResult<()> {
-        if fs::read_symlink(source)
-            .map_err(ServiceError::Adapter)?
-            .is_none()
-        {
+        let Some(actual) = fs::link_destination(source).map_err(ServiceError::Adapter)? else {
             return Ok(());
-        }
-        let actual = fs::canonicalize(source).map_err(ServiceError::Adapter)?;
+        };
         for profile in self.catalog.profiles().values() {
             let Some(tree) =
                 git::existing_worktree(&self.root()?, &profile.branch, &profile.id.to_string())
@@ -149,9 +145,7 @@ impl SaveService {
             };
             let expected = tree.join("games").join(game.to_string());
             fs::require_plain_path(&tree, &expected).map_err(ServiceError::Adapter)?;
-            if fs::exists(&expected).map_err(ServiceError::Adapter)?
-                && fs::canonicalize(&expected).map_err(ServiceError::Adapter)? == actual
-            {
+            if fs::canonicalize_missing(&expected).map_err(ServiceError::Adapter)? == actual {
                 return Ok(());
             }
         }
@@ -218,15 +212,19 @@ impl SaveService {
     pub fn is_bound(&self, game: GameId, profile: &ProfileId) -> ServiceResult<bool> {
         let _guard = self.lock()?;
         let source = self.source(game)?;
-        if fs::read_symlink(&source)
-            .map_err(ServiceError::Adapter)?
-            .is_none()
-        {
+        let Some(actual) = fs::link_destination(&source).map_err(ServiceError::Adapter)? else {
             return Ok(false);
-        }
-        let target = self.target(game, &self.profile(&profile.to_string())?)?;
-        Ok(fs::canonicalize(&source).map_err(ServiceError::Adapter)?
-            == fs::canonicalize(&target).map_err(ServiceError::Adapter)?)
+        };
+        let profile = self.profile(&profile.to_string())?;
+        let Some(tree) =
+            git::existing_worktree(&self.root()?, &profile.branch, &profile.id.to_string())
+                .map_err(ServiceError::Adapter)?
+        else {
+            return Ok(false);
+        };
+        let target = tree.join("games").join(game.to_string());
+        fs::require_plain_path(&tree, &target).map_err(ServiceError::Adapter)?;
+        Ok(actual == fs::canonicalize_missing(&target).map_err(ServiceError::Adapter)?)
     }
 
     /// Import only into the current profile; new profiles start empty.
@@ -248,17 +246,19 @@ impl SaveService {
             }
             return Ok(());
         }
-        if self.runtime.active_profile() == Some(profile.id)
-            && fs::read_symlink(&source)
-                .map_err(ServiceError::Adapter)?
-                .is_some()
-        {
-            return Err(ServiceError::Conflict(
-                "Ссылка игры указывает на другой профиль; импорт остановлен".into(),
-            ));
+        let link = fs::link_destination(&source).map_err(ServiceError::Adapter)?;
+        if self.runtime.active_profile() == Some(profile.id) {
+            if let Some(link) = &link {
+                if *link != fs::canonicalize_missing(&target).map_err(ServiceError::Adapter)? {
+                    return Err(ServiceError::Conflict(
+                        "Ссылка игры указывает на другой профиль; импорт остановлен".into(),
+                    ));
+                }
+            }
         }
         fs::create_dir_all(target.parent().unwrap()).map_err(ServiceError::Adapter)?;
         if self.runtime.active_profile() == Some(profile.id)
+            && link.is_none()
             && fs::exists(&source).map_err(ServiceError::Adapter)?
         {
             let staged = target.with_file_name(format!(".savehub-import-{}", uuid::Uuid::new_v4()));
@@ -324,7 +324,11 @@ impl SaveService {
             return Ok(());
         }
         let staged = source.with_file_name(format!(".savehub-detach-{}", uuid::Uuid::new_v4()));
-        fs::copy_tree(&source, &staged).map_err(ServiceError::Adapter)?;
+        if fs::exists(&source).map_err(ServiceError::Adapter)? {
+            fs::copy_tree(&source, &staged).map_err(ServiceError::Adapter)?;
+        } else {
+            fs::create_dir_all(&staged).map_err(ServiceError::Adapter)?;
+        }
         self.stopped(game_id)?;
         fs::replace_directory(&source, &staged).map_err(ServiceError::Adapter)?;
         Ok(())
@@ -884,6 +888,60 @@ mod tests {
             fs::read(&f.source.join("save.dat")).unwrap(),
             b"original\0\xff"
         );
+    }
+
+    #[test]
+    fn restore_recovers_owned_dangling_link_after_git_deletes_last_file() {
+        let f = Fixture::new();
+        f.bind();
+        let save = f.snapshot();
+        let target = f.target();
+        let tree = target.parent().unwrap().parent().unwrap();
+        git::stage(tree, &git::status(tree).unwrap()).unwrap();
+        let base = git::commit(tree, "saved files").unwrap();
+        let empty = git::commit_files(tree, Some(&base), &[], "remote deletion").unwrap();
+        git::merge(tree, &empty, true).unwrap();
+        assert!(!target.exists());
+        assert!(fs::read_symlink(&f.source).unwrap().is_some());
+        f.service.apply_save(&save.id).unwrap();
+        assert_eq!(
+            fs::read(&f.source.join("save.dat")).unwrap(),
+            b"original\0\xff"
+        );
+        assert!(f.service.is_bound(f.game, &f.profile).unwrap());
+        assert!(
+            f.service
+                .list(None, None)
+                .unwrap()
+                .iter()
+                .any(|s| matches!(s.kind, SaveKind::BeforeRestore))
+        );
+    }
+
+    #[test]
+    fn own_dangling_links_can_be_rebound_or_detached_but_foreign_links_are_preserved() {
+        let f = Fixture::new();
+        f.bind();
+        std::fs::remove_dir_all(f.target()).unwrap();
+        assert!(f.service.is_bound(f.game, &f.profile).unwrap());
+        assert!(!f.target().exists());
+        f.bind();
+        assert!(f.source.is_dir());
+        std::fs::remove_dir_all(f.target()).unwrap();
+        f.service.unbind(f.game).unwrap();
+        assert!(f.source.is_dir());
+        assert!(fs::read_symlink(&f.source).unwrap().is_none());
+
+        std::fs::remove_dir(&f.source).unwrap();
+        let foreign = f.dir.join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        fs::create_symlink(&f.source, &foreign).unwrap();
+        std::fs::remove_dir(&foreign).unwrap();
+        assert!(!f.service.is_bound(f.game, &f.profile).unwrap());
+        assert!(f.service.bind(f.game, &f.profile.to_string()).is_err());
+        assert!(f.service.unbind(f.game).is_err());
+        assert!(fs::read_symlink(&f.source).unwrap().is_some());
+        assert!(!foreign.exists());
     }
 
     #[test]

@@ -22,21 +22,30 @@
   let saves = $state<SaveHistoryEntry[]>([])
   let loading = $state(true)
   let loadError = $state<string | null>(null)
-  // Откат необратим без нового сохранения, поэтому спрашиваем второй раз
+  // Подтверждение требуется перед заменой текущих файлов.
   let confirming = $state<string | null>(null)
+  let restoring = $state(false)
+  let generation = 0
 
   async function load() {
+    const current = ++generation
+    loading = true
+    confirming = null
     try {
-      saves = await api.listSaveHistory(gameId)
+      const result = await api.listSaveHistory(gameId)
+      if (current !== generation) return
+      saves = result
       loadError = null
     } catch (e) {
-      loadError = describeError(e)
+      if (current === generation) loadError = describeError(e)
     } finally {
-      loading = false
+      if (current === generation) loading = false
     }
   }
 
   async function restore(save: SaveHistoryEntry) {
+    if (restoring) return
+    restoring = true
     confirming = null
     try {
       await api.restoreSave(save.id)
@@ -44,14 +53,14 @@
       await load()
     } catch (e) {
       notice.error(e)
-    }
+    } finally { restoring = false }
   }
 
   onMount(() => {
     if (!features.saveHistory) return
     api.listGames().then((list) => (games = list), notice.error.bind(notice))
-    load()
-    return subscribe(events.savesChanged, load)
+    const stop = subscribe(events.savesChanged, load, load)
+    return () => { generation++; stop() }
   })
 </script>
 
@@ -62,7 +71,7 @@
 {#if features.saveHistory}
 <label class="field">
   <span class="muted">Игра</span>
-  <select bind:value={gameId} onchange={load}>
+  <select disabled={restoring} bind:value={gameId} onchange={load}>
     <option value={null}>Все игры</option>
     {#each games as game (game.id)}
       <option value={game.id}>{game.name}</option>
@@ -83,10 +92,10 @@
           </div>
         </div>
         {#if confirming === save.id}
-          <button onclick={() => (confirming = null)}>Отмена</button>
-          <button class="danger" onclick={() => restore(save)}>Точно откатить</button>
+          <button disabled={restoring} onclick={() => (confirming = null)}>Отмена</button>
+          <button disabled={restoring} class="danger" onclick={() => restore(save)}>Точно откатить</button>
         {:else}
-          <button onclick={() => (confirming = save.id)}>Откатить</button>
+          <button disabled={restoring} onclick={() => (confirming = save.id)}>Откатить</button>
         {/if}
       </li>
     {:else}

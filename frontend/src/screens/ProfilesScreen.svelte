@@ -13,15 +13,19 @@
   let loadError = $state<string | null>(null)
   let switchingTo = $state<string | null>(null)
   let newName = $state('')
+  let generation = 0
 
   async function load() {
+    const current = ++generation
     try {
-      profiles = await api.listProfiles()
+      const result = await api.listProfiles()
+      if (current !== generation) return
+      profiles = result
       loadError = null
     } catch (e) {
-      loadError = describeError(e)
+      if (current === generation) loadError = describeError(e)
     } finally {
-      loading = false
+      if (current === generation) loading = false
     }
   }
 
@@ -75,8 +79,8 @@
   }
 
   onMount(() => {
-    load()
-    return subscribe(events.profileChanged, load)
+    const stop = subscribe(events.profileChanged, load, load)
+    return () => { generation++; stop() }
   })
 </script>
 
