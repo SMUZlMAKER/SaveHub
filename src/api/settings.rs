@@ -60,7 +60,7 @@ pub async fn update_settings(
     })
     .await
     .map_err(|error| ApiError::Internal(error.to_string()))??;
-    let _ = worker.sync_now();
+    let _ = worker.wake();
     Ok(())
 }
 
@@ -72,6 +72,6 @@ pub fn set_github_token(
     worker: State<'_, RepoWorkerHandle>,
 ) -> ApiResult<()> {
     service.set_github_token(token.trim())?;
-    let _ = worker.sync_now();
+    let _ = worker.wake();
     Ok(())
 }

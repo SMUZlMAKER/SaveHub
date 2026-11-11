@@ -19,7 +19,7 @@ pub(crate) struct SyncRequest {
 /// None means the operation was skipped.
 #[derive(Default)]
 pub(crate) struct SyncOutcome {
-    pub checkpoint: Option<ServiceResult<()>>,
+    pub checkpoint: Option<ServiceResult<bool>>,
     pub push: Option<ServiceResult<()>>,
     pub fetch: Option<ServiceResult<()>>,
 }
@@ -27,7 +27,8 @@ pub(crate) struct SyncOutcome {
 impl SyncOutcome {
     pub fn into_result(self) -> ServiceResult<()> {
         self.checkpoint
-            .unwrap_or(Ok(()))
+            .unwrap_or(Ok(false))
+            .map(|_| ())
             .and(self.push.unwrap_or(Ok(())))
             .and(self.fetch.unwrap_or(Ok(())))
     }
@@ -102,7 +103,6 @@ impl SyncRepository {
                 last_sync_at: None,
                 error: None,
             });
-            request.checkpoint = true;
             request.push = true;
         }
 
@@ -130,7 +130,8 @@ impl SyncRepository {
             outcome.checkpoint = Some(result);
         }
 
-        if request.push && self.has_pending_push() {
+        if (request.push || matches!(outcome.checkpoint, Some(Ok(true)))) && self.has_pending_push()
+        {
             let result = self.push_pending_profiles();
             self.push_error = error_message(&result);
             outcome.push = Some(result);
@@ -175,10 +176,10 @@ impl SyncRepository {
         result
     }
 
-    fn checkpoint_current_profile(&mut self) -> ServiceResult<()> {
+    fn checkpoint_current_profile(&mut self) -> ServiceResult<bool> {
         let (profile, running) = self.runtime.profile_and_running_games();
         let Some(profile) = profile else {
-            return Ok(());
+            return Ok(false);
         };
         let games = running.ok_or(ServiceError::ProcessesUnknown)?;
 
@@ -197,7 +198,7 @@ impl SyncRepository {
         if commit.is_some() || self.repo.has_unpushed_commits(&profile)? {
             self.pending_push.insert(profile);
         }
-        Ok(())
+        Ok(commit.is_some())
     }
 
     // Fetch only updates refs, so only a successful push advances last_sync_at.
@@ -231,6 +232,6 @@ impl SyncRepository {
     }
 }
 
-fn error_message(result: &ServiceResult<()>) -> Option<String> {
+fn error_message<T>(result: &ServiceResult<T>) -> Option<String> {
     result.as_ref().err().map(|error| format!("{error:?}"))
 }

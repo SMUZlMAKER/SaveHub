@@ -261,11 +261,11 @@ fn notifications_are_coalesced_and_manual_sync_is_preserved() {
     };
     handle.sync_now().unwrap();
     for _ in 0..1000 {
-        handle.files_changed().unwrap();
+        handle.wake().unwrap();
     }
-    let requests = handle.wakeup.requests.lock().unwrap();
-    assert!(requests.sync);
-    assert!(requests.last_change.is_some());
+    let state = handle.wakeup.state.lock().unwrap();
+    assert!(state.requests.sync);
+    assert!(state.requests.wake);
 }
 
 #[test]
@@ -284,41 +284,6 @@ fn busy_mutex_does_not_hang_shutdown() {
     drop(guard);
     worker.shutdown().unwrap();
     assert_eq!(&repo.take_calls()[..2], ["checkpoint:a", "push:a"]);
-}
-
-#[test]
-fn debounce_waits_for_quiet_but_periodic_scan_bounds_delay() {
-    let repo = Arc::new(FakeRepo::default());
-    let (mut engine, _runtime, _operations) = engine(repo.clone());
-    let now = Instant::now();
-    engine.tick(now, false).unwrap();
-    repo.take_calls();
-
-    let changed = now + Duration::from_secs(1);
-    engine.schedule_requests(
-        &Requests {
-            last_change: Some(changed),
-            ..Requests::default()
-        },
-        changed,
-    );
-    engine.tick(changed, false).unwrap();
-    assert!(repo.take_calls().is_empty());
-    engine
-        .tick(changed + engine.options.debounce, false)
-        .unwrap();
-    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a"]);
-
-    let scan_due = engine.scan_due;
-    engine.schedule_requests(
-        &Requests {
-            last_change: Some(scan_due),
-            ..Requests::default()
-        },
-        scan_due,
-    );
-    engine.tick(scan_due, false).unwrap();
-    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a"]);
 }
 
 #[test]
@@ -362,11 +327,10 @@ fn idle_worker_waits_until_next_operation_not_polling_interval() {
 }
 
 #[test]
-fn file_events_do_not_bypass_checkpoint_backoff() {
+fn wake_does_not_bypass_checkpoint_backoff() {
     let repo = Arc::new(FakeRepo::default());
     repo.fail_checkpoint.store(true, Ordering::SeqCst);
     let (mut worker, _, _) = engine(repo.clone());
-    worker.options.debounce = Duration::from_secs(2);
     let now = Instant::now();
     assert!(worker.tick(now, false).is_err());
     repo.take_calls();
@@ -374,15 +338,13 @@ fn file_events_do_not_bypass_checkpoint_backoff() {
     let changed = now + Duration::from_secs(1);
     worker.schedule_requests(
         &Requests {
-            last_change: Some(changed),
+            wake: true,
             ..Requests::default()
         },
         changed,
     );
-    worker
-        .tick(changed + worker.options.debounce, false)
-        .unwrap();
-    assert!(repo.take_calls().is_empty());
+    worker.tick(changed, false).unwrap();
+    assert_eq!(repo.take_calls(), ["fetch"]);
 
     repo.fail_checkpoint.store(false, Ordering::SeqCst);
     worker.tick(worker.checkpoint_retry_after, false).unwrap();
@@ -390,10 +352,9 @@ fn file_events_do_not_bypass_checkpoint_backoff() {
 }
 
 #[test]
-fn file_events_do_not_bypass_busy_mutex_backoff() {
+fn wake_does_not_bypass_busy_mutex_backoff() {
     let repo = Arc::new(FakeRepo::default());
     let (mut worker, _, operations) = engine(repo.clone());
-    worker.options.debounce = Duration::from_secs(2);
     let guard = operations.lock().unwrap();
     let now = Instant::now();
     worker.tick(now, false).unwrap();
@@ -402,14 +363,12 @@ fn file_events_do_not_bypass_busy_mutex_backoff() {
     let changed = now + Duration::from_secs(1);
     worker.schedule_requests(
         &Requests {
-            last_change: Some(changed),
+            wake: true,
             ..Requests::default()
         },
         changed,
     );
-    worker
-        .tick(changed + worker.options.debounce, false)
-        .unwrap();
+    worker.tick(changed, false).unwrap();
     assert!(repo.take_calls().is_empty());
     assert_eq!(worker.next_deadline(), worker.operations_retry_after);
 
@@ -456,6 +415,94 @@ fn newly_created_commit_is_pushed_without_ahead_query() {
 }
 
 #[test]
+fn automatic_commits_wait_thirty_minutes_despite_wakes_and_scans() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.creates_commit.store(true, Ordering::SeqCst);
+    let (mut worker, _, _) = engine(repo.clone());
+    worker.tick(Instant::now(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a", "fetch"]);
+    assert_eq!(worker.options.commit_interval, Duration::from_secs(1800));
+
+    let allowed_at = worker.next_commit_allowed;
+    let changed_at = allowed_at - Duration::from_secs(1);
+    worker.schedule_requests(
+        &Requests {
+            wake: true,
+            ..Requests::default()
+        },
+        changed_at,
+    );
+    worker.tick(changed_at, false).unwrap();
+    assert_eq!(repo.take_calls(), ["fetch"]);
+    assert_eq!(worker.next_deadline(), allowed_at);
+
+    worker.tick(allowed_at, false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a"]);
+}
+
+#[test]
+fn failed_push_is_retried_while_commits_are_throttled() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.creates_commit.store(true, Ordering::SeqCst);
+    repo.fail_push.store(true, Ordering::SeqCst);
+    let (mut worker, _, _) = engine(repo.clone());
+    assert!(worker.tick(Instant::now(), false).is_err());
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a", "fetch"]);
+
+    repo.fail_push.store(false, Ordering::SeqCst);
+    assert!(worker.next_deadline() < worker.next_commit_allowed);
+    worker.tick(worker.next_deadline(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["push:a"]);
+}
+
+#[test]
+fn manual_sync_and_flush_commit_immediately_and_restart_automatic_interval() {
+    for flushing in [false, true] {
+        let repo = Arc::new(FakeRepo::default());
+        repo.creates_commit.store(true, Ordering::SeqCst);
+        let (mut worker, _, _) = engine(repo.clone());
+        worker.tick(Instant::now(), false).unwrap();
+        repo.take_calls();
+
+        let now = worker.next_commit_allowed - Duration::from_secs(60);
+        let (reply, _result) = mpsc::sync_channel(1);
+        worker.schedule_requests(
+            &Requests {
+                sync: !flushing,
+                flush: flushing.then_some(FlushRequest {
+                    reply,
+                    mode: FlushMode::Pause,
+                }),
+                ..Requests::default()
+            },
+            now,
+        );
+        worker.tick(now, flushing).unwrap();
+        let calls = repo.take_calls();
+        assert_eq!(&calls[..2], ["checkpoint:a", "push:a"]);
+        assert_eq!(
+            worker.next_commit_allowed,
+            now + worker.options.commit_interval
+        );
+        assert!(!worker.checkpoint_forced);
+        assert_eq!(worker.checkpoint_deadline(), worker.next_commit_allowed);
+    }
+}
+
+#[test]
+fn new_commit_is_pushed_even_before_push_retry_deadline() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.creates_commit.store(true, Ordering::SeqCst);
+    let (mut worker, _, _) = engine(repo.clone());
+    worker.tick(Instant::now(), false).unwrap();
+    repo.take_calls();
+
+    worker.push_due = worker.next_commit_allowed + Duration::from_secs(10);
+    worker.tick(worker.next_commit_allowed, false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a", "fetch"]);
+}
+
+#[test]
 fn empty_request_does_not_publish_success() {
     let repo = Arc::new(FakeRepo::default());
     let runtime = runtime();
@@ -492,7 +539,6 @@ fn notifications_and_shutdown_wake_a_live_worker_with_distant_deadlines() {
     let (events, received) = mpsc::channel();
     *repo.events.lock().unwrap() = Some(events);
     let options = RepoWorkerOptions {
-        debounce: Duration::from_millis(10),
         scan_interval: Duration::from_secs(3600),
         fetch_interval: Duration::from_secs(3600),
         ..RepoWorkerOptions::default()
@@ -516,8 +562,9 @@ fn notifications_and_shutdown_wake_a_live_worker_with_distant_deadlines() {
         Err(mpsc::RecvTimeoutError::Timeout)
     ));
 
-    handle.files_changed().unwrap();
+    handle.wake().unwrap();
     assert_eq!(next_event(), "checkpoint:a");
+    assert_eq!(next_event(), "fetch");
     handle.sync_now().unwrap();
     assert_eq!(next_event(), "checkpoint:a");
     assert_eq!(next_event(), "fetch");
@@ -550,7 +597,7 @@ fn unconfigured_worker_skips_git_and_resumes_after_settings_change() {
     repo.unconfigured.store(false, Ordering::SeqCst);
     worker.schedule_requests(
         &Requests {
-            sync: true,
+            wake: true,
             ..Requests::default()
         },
         now,
@@ -562,7 +609,7 @@ fn unconfigured_worker_skips_git_and_resumes_after_settings_change() {
     repo.unconfigured.store(true, Ordering::SeqCst);
     worker.schedule_requests(
         &Requests {
-            sync: true,
+            wake: true,
             ..Requests::default()
         },
         now,
@@ -606,7 +653,7 @@ fn changing_repository_does_not_send_pending_profiles_to_new_remote() {
     let now = Instant::now();
     worker.schedule_requests(
         &Requests {
-            sync: true,
+            wake: true,
             ..Requests::default()
         },
         now,
@@ -667,7 +714,7 @@ fn panicked_worker_reports_failure_and_rejects_further_requests() {
     });
 
     assert!(handle.sync_now().is_err());
-    assert!(handle.files_changed().is_err());
+    assert!(handle.wake().is_err());
     assert!(worker.shutdown().is_err());
 }
 
@@ -686,7 +733,7 @@ fn shutdown_with_unknown_processes_keeps_worker_available_for_retry() {
         worker.shutdown(),
         Err(ServiceError::ProcessesUnknown)
     ));
-    assert!(worker.handle().files_changed().is_ok());
+    assert!(worker.handle().wake().is_ok());
     assert!(
         !repo
             .take_calls()
@@ -714,13 +761,13 @@ fn failed_final_push_can_be_retried_without_recreating_worker() {
     .unwrap();
 
     assert!(worker.shutdown().is_err());
-    assert!(worker.handle().files_changed().is_ok());
+    assert!(worker.handle().wake().is_ok());
     assert!(repo.take_calls().iter().any(|call| call == "push:a"));
 
     repo.fail_push.store(false, Ordering::SeqCst);
     worker.shutdown().unwrap();
     assert!(repo.take_calls().iter().any(|call| call == "push:a"));
-    assert!(worker.handle().files_changed().is_err());
+    assert!(worker.handle().wake().is_err());
 }
 
 #[test]
@@ -734,11 +781,11 @@ fn updater_flush_reports_failure_and_keeps_worker_running() {
     .unwrap();
     let handle = worker.handle();
 
-    assert!(handle.flush().is_err());
-    assert!(handle.files_changed().is_ok());
+    assert!(handle.pause_after_flush().is_err());
+    assert!(handle.wake().is_ok());
     repo.fail_push.store(false, Ordering::SeqCst);
-    handle.flush().unwrap();
-    assert!(handle.files_changed().is_ok());
+    drop(handle.pause_after_flush().unwrap());
+    assert!(handle.wake().is_ok());
     worker.shutdown().unwrap();
 }
 
@@ -765,17 +812,17 @@ fn assert_queued_flush_is_completed_when_worker_ends(panic: bool) {
 
     let (finished, completion) = mpsc::channel();
     let waiting_handle = handle.clone();
-    let waiter = thread::spawn(move || finished.send(waiting_handle.flush()).unwrap());
-    let requests = handle.wakeup.requests.lock().unwrap();
-    let (requests, timeout) = handle
+    let waiter = thread::spawn(move || finished.send(waiting_handle.pause_after_flush()).unwrap());
+    let state = handle.wakeup.state.lock().unwrap();
+    let (state, timeout) = handle
         .wakeup
         .ready
-        .wait_timeout_while(requests, Duration::from_secs(2), |requests| {
-            requests.flush.is_none()
+        .wait_timeout_while(state, Duration::from_secs(2), |state| {
+            state.requests.flush.is_none()
         })
         .unwrap();
     assert!(!timeout.timed_out());
-    drop(requests);
+    drop(state);
 
     release.send(()).unwrap();
     assert!(
@@ -808,9 +855,9 @@ fn installation_pause_retains_notifications_and_resumes_on_guard_drop() {
     let (events, received) = mpsc::channel();
     *repo.events.lock().unwrap() = Some(events);
 
-    handle.files_changed().unwrap();
+    handle.wake().unwrap();
     handle.sync_now().unwrap();
-    assert!(handle.flush().is_err());
+    assert!(handle.pause_after_flush().is_err());
     assert!(worker.shutdown().is_err());
     assert!(matches!(
         received.recv_timeout(Duration::from_millis(30)),
@@ -824,4 +871,43 @@ fn installation_pause_retains_notifications_and_resumes_on_guard_drop() {
         "checkpoint:a"
     );
     worker.shutdown().unwrap();
+}
+
+#[test]
+fn resuming_after_installation_does_not_bypass_commit_interval() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.creates_commit.store(true, Ordering::SeqCst);
+    let mut worker = started_worker(&repo);
+    let handle = worker.handle();
+    let pause = handle.pause_after_flush().unwrap();
+    repo.take_calls();
+    let (events, received) = mpsc::channel();
+    *repo.events.lock().unwrap() = Some(events);
+
+    handle.wake().unwrap();
+    drop(pause);
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "fetch"
+    );
+    assert!(matches!(
+        received.recv_timeout(Duration::from_millis(30)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(repo.take_calls(), ["fetch"]);
+    worker.shutdown().unwrap();
+}
+
+#[test]
+fn dropping_pause_guard_does_not_revive_stopped_worker() {
+    let repo = Arc::new(FakeRepo::default());
+    let worker = started_worker(&repo);
+    let handle = worker.handle();
+    let pause = handle.pause_after_flush().unwrap();
+
+    drop(worker);
+    drop(pause);
+    assert!(handle.wake().is_err());
+    assert!(handle.sync_now().is_err());
+    assert!(handle.pause_after_flush().is_err());
 }

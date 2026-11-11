@@ -2,7 +2,6 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
         mpsc::{self, SyncSender},
     },
     thread::{self, JoinHandle},
@@ -16,7 +15,7 @@ use crate::{
 
 #[derive(Clone, Copy)]
 pub struct RepoWorkerOptions {
-    pub debounce: Duration,
+    pub commit_interval: Duration,
     pub scan_interval: Duration,
     pub fetch_interval: Duration,
     pub retry_interval: Duration,
@@ -25,7 +24,7 @@ pub struct RepoWorkerOptions {
 impl Default for RepoWorkerOptions {
     fn default() -> Self {
         Self {
-            debounce: Duration::from_secs(30),
+            commit_interval: Duration::from_secs(30 * 60),
             scan_interval: Duration::from_secs(60),
             fetch_interval: Duration::from_secs(300),
             retry_interval: Duration::from_secs(10),
@@ -35,9 +34,8 @@ impl Default for RepoWorkerOptions {
 
 #[derive(Default)]
 struct Requests {
-    last_change: Option<Instant>,
+    wake: bool,
     sync: bool,
-    stop: bool,
     flush: Option<FlushRequest>,
 }
 
@@ -48,30 +46,38 @@ struct FlushRequest {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FlushMode {
-    Continue,
     Pause,
     Stop,
 }
 
+#[derive(Default, PartialEq, Eq)]
+enum WorkerStatus {
+    #[default]
+    Running,
+    Paused,
+    Stopped,
+}
+
+#[derive(Default)]
+struct WorkerState {
+    status: WorkerStatus,
+    requests: Requests,
+}
+
 #[derive(Default)]
 struct Wakeup {
-    stopped: AtomicBool,
-    paused: AtomicBool,
-    requests: Mutex<Requests>,
+    state: Mutex<WorkerState>,
     ready: Condvar,
 }
 
 impl Wakeup {
     fn close(&self) {
         let pending = {
-            let mut requests = self
-                .requests
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            self.stopped.store(true, Ordering::Release);
-            requests.stop = true;
-            requests.flush.take()
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.status = WorkerStatus::Stopped;
+            state.requests.flush.take()
         };
+
         if let Some(flush) = pending {
             let _ = flush.reply.try_send(Err(ServiceError::Conflict(
                 "Repository worker is stopped".into(),
@@ -82,15 +88,16 @@ impl Wakeup {
 
     fn pause(&self) -> ServiceResult<()> {
         let pending = {
-            let mut requests = self.requests.lock().expect("Worker requests poisoned");
-            if self.stopped.load(Ordering::Acquire) {
+            let mut state = self.state.lock().expect("Worker state poisoned");
+            if state.status == WorkerStatus::Stopped {
                 return Err(ServiceError::Conflict(
                     "Repository worker is stopped".into(),
                 ));
             }
-            self.paused.store(true, Ordering::Release);
-            requests.flush.take()
+            state.status = WorkerStatus::Paused;
+            state.requests.flush.take()
         };
+
         if let Some(flush) = pending {
             let _ = flush.reply.try_send(Err(ServiceError::Conflict(
                 "Repository worker is paused for installation".into(),
@@ -100,12 +107,12 @@ impl Wakeup {
     }
 
     fn resume(&self) {
-        let mut requests = self.requests.lock().expect("Worker requests poisoned");
-        self.paused.store(false, Ordering::Release);
-        if !self.stopped.load(Ordering::Acquire) {
-            requests.sync = true;
+        let mut state = self.state.lock().expect("Worker state poisoned");
+        if state.status == WorkerStatus::Paused {
+            state.status = WorkerStatus::Running;
+            state.requests.wake = true;
+            self.ready.notify_one();
         }
-        self.ready.notify_one();
     }
 }
 
@@ -126,42 +133,26 @@ pub struct RepoWorkerHandle {
 }
 
 impl RepoWorkerHandle {
-    /// Forward relevant save-file events here, excluding Git's own files.
-    pub fn files_changed(&self) -> ServiceResult<()> {
-        let mut requests = self
-            .wakeup
-            .requests
-            .lock()
-            .expect("Worker requests poisoned");
-        if self.wakeup.stopped.load(Ordering::Acquire) {
-            return Err(ServiceError::Conflict(
-                "Repository worker is stopped".into(),
-            ));
-        }
-        requests.last_change = Some(Instant::now());
-        self.wakeup.ready.notify_one();
-        Ok(())
+    pub fn wake(&self) -> ServiceResult<()> {
+        self.request_sync(false)
     }
 
     pub fn sync_now(&self) -> ServiceResult<()> {
-        let mut requests = self
-            .wakeup
-            .requests
-            .lock()
-            .expect("Worker requests poisoned");
-        if self.wakeup.stopped.load(Ordering::Acquire) {
+        self.request_sync(true)
+    }
+
+    fn request_sync(&self, force_checkpoint: bool) -> ServiceResult<()> {
+        let mut state = self.wakeup.state.lock().expect("Worker state poisoned");
+        if state.status == WorkerStatus::Stopped {
             return Err(ServiceError::Conflict(
                 "Repository worker is stopped".into(),
             ));
         }
-        requests.sync = true;
+
+        state.requests.wake = true;
+        state.requests.sync |= force_checkpoint;
         self.wakeup.ready.notify_one();
         Ok(())
-    }
-
-    /// Blocking synchronization barrier; leaves the worker running.
-    pub fn flush(&self) -> ServiceResult<()> {
-        self.request_flush(FlushMode::Continue)
     }
 
     pub fn pause_after_flush(&self) -> ServiceResult<RepoWorkerPause> {
@@ -174,27 +165,23 @@ impl RepoWorkerHandle {
     fn request_flush(&self, mode: FlushMode) -> ServiceResult<()> {
         let (reply, result) = mpsc::sync_channel(1);
         {
-            let mut requests = self
-                .wakeup
-                .requests
-                .lock()
-                .expect("Worker requests poisoned");
-            if self.wakeup.stopped.load(Ordering::Acquire) {
+            let mut state = self.wakeup.state.lock().expect("Worker state poisoned");
+            if state.status == WorkerStatus::Stopped {
                 return Err(ServiceError::Conflict(
                     "Repository worker is stopped".into(),
                 ));
             }
-            if self.wakeup.paused.load(Ordering::Acquire) {
+            if state.status == WorkerStatus::Paused {
                 return Err(ServiceError::Conflict(
                     "Repository worker is paused for installation".into(),
                 ));
             }
-            if requests.flush.is_some() {
+            if state.requests.flush.is_some() {
                 return Err(ServiceError::Conflict(
                     "Repository flush is already requested".into(),
                 ));
             }
-            requests.flush = Some(FlushRequest { reply, mode });
+            state.requests.flush = Some(FlushRequest { reply, mode });
             self.wakeup.ready.notify_one();
         }
         result
@@ -214,7 +201,8 @@ pub struct RepoWorker {
 
 impl RepoWorker {
     pub fn start(sync: SyncRepository, options: RepoWorkerOptions) -> std::io::Result<Self> {
-        if options.scan_interval.is_zero()
+        if options.commit_interval.is_zero()
+            || options.scan_interval.is_zero()
             || options.fetch_interval.is_zero()
             || options.retry_interval.is_zero()
         {
@@ -279,11 +267,12 @@ impl Drop for RepoWorker {
 struct RepoWorkerLoop {
     sync: SyncRepository,
     options: RepoWorkerOptions,
-    checkpoint_due: Instant,
     scan_due: Instant,
     push_due: Instant,
     fetch_due: Instant,
     checkpoint_retry_after: Instant,
+    next_commit_allowed: Instant,
+    checkpoint_forced: bool,
     operations_retry_after: Instant,
 }
 
@@ -294,11 +283,12 @@ impl RepoWorkerLoop {
         Self {
             sync,
             options,
-            checkpoint_due: now,
             scan_due: now,
             push_due: now,
             fetch_due: now,
             checkpoint_retry_after: now,
+            next_commit_allowed: now,
+            checkpoint_forced: false,
             operations_retry_after: now,
         }
     }
@@ -306,31 +296,29 @@ impl RepoWorkerLoop {
     fn run(&mut self, wakeup: Arc<Wakeup>) -> ServiceResult<()> {
         loop {
             let requests = {
-                let requests = wakeup.requests.lock().expect("Worker requests poisoned");
-                let requests = wakeup
+                let state = wakeup.state.lock().expect("Worker state poisoned");
+                let state = wakeup
                     .ready
-                    .wait_while(requests, |requests| {
-                        wakeup.paused.load(Ordering::Acquire) && !requests.stop
-                    })
-                    .expect("Worker requests poisoned");
+                    .wait_while(state, |state| state.status == WorkerStatus::Paused)
+                    .expect("Worker state poisoned");
                 let timeout = self
                     .next_deadline()
                     .saturating_duration_since(Instant::now());
-                let (mut requests, _) = wakeup
+                let (mut state, _) = wakeup
                     .ready
-                    .wait_timeout_while(requests, timeout, |requests| {
-                        !requests.stop
-                            && !requests.sync
-                            && requests.last_change.is_none()
-                            && requests.flush.is_none()
+                    .wait_timeout_while(state, timeout, |state| {
+                        state.status == WorkerStatus::Running
+                            && !state.requests.wake
+                            && !state.requests.sync
+                            && state.requests.flush.is_none()
                     })
-                    .expect("Worker requests poisoned");
+                    .expect("Worker state poisoned");
 
-                std::mem::take(&mut *requests)
+                if state.status == WorkerStatus::Stopped {
+                    return Ok(());
+                }
+                std::mem::take(&mut state.requests)
             };
-            if requests.stop {
-                return Ok(());
-            }
 
             let now = Instant::now();
             self.schedule_requests(&requests, now);
@@ -339,7 +327,6 @@ impl RepoWorkerLoop {
             if let Some(flush) = requests.flush {
                 if result.is_ok() {
                     match flush.mode {
-                        FlushMode::Continue => {}
                         FlushMode::Pause => result = wakeup.pause(),
                         FlushMode::Stop => wakeup.close(),
                     }
@@ -357,23 +344,29 @@ impl RepoWorkerLoop {
     }
 
     fn schedule_requests(&mut self, requests: &Requests, now: Instant) {
-        if let Some(changed_at) = requests.last_change {
-            self.checkpoint_due = changed_at + self.options.debounce;
-        }
+        let force_checkpoint = requests.sync || requests.flush.is_some();
 
-        if requests.sync || requests.flush.is_some() {
-            self.checkpoint_due = now;
+        if requests.wake || force_checkpoint {
+            self.scan_due = now;
             self.push_due = now;
             self.fetch_due = now;
+        }
+
+        if force_checkpoint {
+            self.checkpoint_forced = true;
             self.checkpoint_retry_after = now;
             self.operations_retry_after = now;
         }
     }
 
     fn checkpoint_deadline(&self) -> Instant {
-        self.checkpoint_due
-            .min(self.scan_due)
-            .max(self.checkpoint_retry_after)
+        let deadline = self.scan_due.max(self.checkpoint_retry_after);
+
+        if self.checkpoint_forced {
+            deadline
+        } else {
+            deadline.max(self.next_commit_allowed)
+        }
     }
 
     fn next_deadline(&self) -> Instant {
@@ -407,8 +400,8 @@ impl RepoWorkerLoop {
 
         match attempt {
             Ok(SyncAttempt::NotConfigured) => {
+                self.checkpoint_forced = false;
                 let next_check = finished_at + self.options.scan_interval;
-                self.checkpoint_due = next_check;
                 self.scan_due = next_check;
                 self.push_due = next_check;
                 self.fetch_due = next_check;
@@ -436,9 +429,13 @@ impl RepoWorkerLoop {
     }
 
     fn schedule_next_attempts(&mut self, now: Instant, outcome: &SyncOutcome) {
+        if matches!(outcome.checkpoint, Some(Ok(true))) {
+            self.next_commit_allowed = now + self.options.commit_interval;
+        }
+
         if let Some(result) = &outcome.checkpoint {
+            self.checkpoint_forced = false;
             self.scan_due = now + self.next_interval(result, self.options.scan_interval);
-            self.checkpoint_due = self.scan_due;
             self.checkpoint_retry_after = if result.is_err() { self.scan_due } else { now };
         }
 
@@ -451,7 +448,7 @@ impl RepoWorkerLoop {
         }
     }
 
-    fn next_interval(&self, result: &ServiceResult<()>, regular: Duration) -> Duration {
+    fn next_interval<T>(&self, result: &ServiceResult<T>, regular: Duration) -> Duration {
         if result.is_ok() {
             regular
         } else {
