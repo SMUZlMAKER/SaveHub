@@ -50,10 +50,6 @@ impl SettingsService {
         self.persist()
     }
 
-    pub fn get_github_token(&self) -> ServiceResult<Option<String>> {
-        crate::adapters::credentials::get_token().map_err(ServiceError::Adapter)
-    }
-
     pub fn has_github_token(&self) -> ServiceResult<bool> {
         crate::adapters::credentials::has_token().map_err(ServiceError::Adapter)
     }
