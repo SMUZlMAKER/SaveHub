@@ -65,6 +65,7 @@ export function describeError(e: unknown): string {
 
 // Ключи аргументов — camelCase: Tauri сам сопоставит их со snake_case-параметрами в Rust.
 export const api = {
+  dismissLaunchDialog: () => call<void>("dismiss_launch_dialog"),
   getLaunchStatus: () => call<LaunchStatus>("get_launch_status"),
   createGameShortcut: (gameId: string) => call<Shortcut>("create_game_shortcut", { gameId }),
   beginGameLaunch: (gameId: string) => call<LaunchStatus>("begin_game_launch", { gameId }),

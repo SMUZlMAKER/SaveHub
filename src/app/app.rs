@@ -28,6 +28,7 @@ pub fn start() {
         )
         .invoke_handler(tauri::generate_handler![
             api::launch::get_launch_status,
+            api::launch::dismiss_launch_dialog,
             api::launch::create_game_shortcut,
             api::launch::begin_game_launch,
             api::launch::confirm_game_launch,
@@ -148,7 +149,7 @@ pub fn start() {
             tray::setup(app.handle())?;
             app.manage(crate::app::updates::Updates::load(app.handle())?);
             app.manage(crate::app::launch::LaunchReady);
-            if !std::env::args().any(|arg| arg == "--autostart") {
+            if !std::env::args().any(|arg| arg == "--autostart" || arg == "--launch-game") {
                 if let Some(window) = app.get_webview_window("main") {
                     window.show()?;
                 }
@@ -165,6 +166,9 @@ pub fn start() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api: close, .. } = event {
                 close.prevent_close();
+                if window.label() == "launch" {
+                    let _ = crate::app::launch::cancel(window.app_handle(), None);
+                }
                 let _ = window.hide();
             }
         })

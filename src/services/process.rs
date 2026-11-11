@@ -139,7 +139,7 @@ impl ProcessService {
         }
         let desktop = dirs::desktop_dir()
             .ok_or_else(|| ServiceError::InvalidInput("Рабочий стол не найден".into()))?;
-        let destination = desktop.join(shortcut_filename(&game.name, game.id));
+        let destination = desktop.join(shortcut_filename(&game.name));
         if destination.exists() {
             return Err(ServiceError::Conflict(format!(
                 "Ярлык уже существует: {}",
@@ -219,15 +219,16 @@ fn matches_process(exe: &Path, names: &[String], process: &process::ProcessInfo)
         || names.iter().any(|n| n.eq_ignore_ascii_case(&process.name))
 }
 
-fn shortcut_filename(name: &str, id: GameId) -> String {
+fn shortcut_filename(name: &str) -> String {
     let clean: String = name
         .chars()
         .filter(|c| !c.is_control() && !"<>:\"/\\|?*".contains(*c))
         .take(60)
         .collect();
+    let clean = clean.trim_matches([' ', '.']);
     format!(
-        "SaveHub - {} ({id}).lnk",
-        clean.trim_end_matches([' ', '.'])
+        "{} — SaveHub.lnk",
+        if clean.is_empty() { "Игра" } else { clean }
     )
 }
 
@@ -236,9 +237,11 @@ mod tests {
     use super::*;
     #[test]
     fn shortcut_name_cannot_escape_desktop_or_use_reserved_names() {
-        let name = shortcut_filename("../CON:\\bad\"|?*\n", uuid::Uuid::nil());
+        let name = shortcut_filename("../CON:\\bad\"|?*\n");
         assert_eq!(Path::new(&name).components().count(), 1);
-        assert!(name.starts_with("SaveHub - "));
+        assert!(name.ends_with(" — SaveHub.lnk"));
+        assert_eq!(shortcut_filename("Balatro"), "Balatro — SaveHub.lnk");
+        assert_eq!(shortcut_filename("..."), "Игра — SaveHub.lnk");
         assert!(!name.contains(['/', '\\', ':', '"', '|', '?', '*', '\n']));
     }
     #[test]

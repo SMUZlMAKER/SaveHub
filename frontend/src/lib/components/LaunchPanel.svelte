@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { api, describeError, events, subscribe } from '../api'
   import type { LaunchStatus } from '../types'
+  let { compact = false }: { compact?: boolean } = $props()
   let status = $state<LaunchStatus | null>(null)
   let profileId = $state('')
   let busy = $state(false)
@@ -35,9 +36,10 @@
 </script>
 
 {#if status && status.phase !== 'idle'}
-  <section class="card launch-panel" aria-label="Запуск игры" aria-live="polite">
+  <section class="card launch-panel" class:compact aria-label="Запуск игры" aria-live="polite">
     <h3>{status.gameName ?? 'Запуск через SaveHub'}</h3>
     {#if status.phase === 'preparing'}<p role="status">Подготавливаем запуск и проверяем обновления SaveHub…</p>
+    {:else if status.phase === 'starting'}<p role="status">Запускаем игру…</p>
     {:else if status.phase === 'awaitingProfile'}
       <label class="field"><span>Профиль для запуска</span>
         <select bind:value={profileId} disabled={busy}>
@@ -51,7 +53,10 @@
     {:else if status.phase === 'running'}<p role="status">Игра запущена{status.pid ? ` · PID ${status.pid}` : ''}. {status.monitorError ? 'Состояние процесса временно неизвестно.' : 'SaveHub следит за процессом.'}</p>
     {:else if status.phase === 'stopped'}<p role="status">Процесс игры завершён.</p>
     {:else if status.phase === 'cancelled'}<p role="status">Запуск отменён.</p>{/if}
-    {#if status.warnings.length}<ul>{#each status.warnings as warning}<li class="muted">{warning}</li>{/each}</ul>{/if}
+    {#if status.warnings.length}
+      {#if compact}<details><summary>Информация о запуске</summary><ul>{#each status.warnings as warning}<li class="muted">{warning}</li>{/each}</ul></details>
+      {:else}<ul>{#each status.warnings as warning}<li class="muted">{warning}</li>{/each}</ul>{/if}
+    {/if}
     {#if status.monitorError}<p class="error" role="alert">{status.monitorError}</p>{/if}
     {#if error || status.error}<p class="error" role="alert">{error || status.error}</p>{/if}
   </section>
@@ -59,6 +64,8 @@
 
 <style>
   .launch-panel { margin: 16px 24px; padding: 16px; }
+  .compact { margin: 0; }
+  details { margin-top: 12px; }
   h3 { margin-top: 0; }
   li + li { margin-top: 6px; }
 </style>

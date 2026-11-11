@@ -8,7 +8,10 @@ use crate::{
     services::{game::GameService, process::ProcessService},
     workflows::launch_game::LaunchGame,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use tauri::{Emitter, Manager};
 
 pub struct LaunchReady;
@@ -17,6 +20,8 @@ pub struct LaunchReady;
 pub struct Launches {
     status: Mutex<LaunchStatus>,
     pub operation: tokio::sync::Mutex<()>,
+    dialog_mode: AtomicBool,
+    cancel_requested: AtomicBool,
 }
 impl Launches {
     pub fn status(&self) -> LaunchStatus {
@@ -45,9 +50,36 @@ impl Launches {
         };
         let _ = app.emit(events::LAUNCH_STATUS_CHANGED, next);
     }
-    pub fn publish(&self, app: &tauri::AppHandle, status: LaunchStatus) {
-        *self.status.lock().unwrap() = status.clone();
+    pub fn publish(&self, app: &tauri::AppHandle, mut status: LaunchStatus) {
+        {
+            let mut current = self.status.lock().unwrap();
+            if self.cancel_requested.load(Ordering::SeqCst)
+                && matches!(status.phase.as_str(), "preparing" | "awaitingProfile")
+            {
+                status.phase = "cancelled".into();
+            }
+            *current = status.clone();
+        }
+        let finished = matches!(status.phase.as_str(), "running" | "cancelled");
         let _ = app.emit(events::LAUNCH_STATUS_CHANGED, status);
+        if finished && self.dialog_mode.load(Ordering::SeqCst) {
+            if let Some(window) = app.get_webview_window("launch") {
+                let _ = window.hide();
+            }
+        }
+    }
+    fn starting(&self, app: &tauri::AppHandle) -> bool {
+        let next = {
+            let mut status = self.status.lock().unwrap();
+            if self.cancel_requested.load(Ordering::SeqCst) {
+                return false;
+            }
+            status.phase = "starting".into();
+            status.error = None;
+            status.clone()
+        };
+        let _ = app.emit(events::LAUNCH_STATUS_CHANGED, next);
+        true
     }
 }
 fn error_message(error: &ApiError) -> String {
@@ -58,6 +90,13 @@ fn error_message(error: &ApiError) -> String {
 }
 
 pub async fn begin(app: &tauri::AppHandle, game_id: GameId) -> ApiResult<LaunchStatus> {
+    begin_internal(app, game_id, false).await
+}
+async fn begin_internal(
+    app: &tauri::AppHandle,
+    game_id: GameId,
+    dialog: bool,
+) -> ApiResult<LaunchStatus> {
     let state = app.state::<Launches>();
     let _guard = state
         .operation
@@ -68,6 +107,8 @@ pub async fn begin(app: &tauri::AppHandle, game_id: GameId) -> ApiResult<LaunchS
             "Сначала завершите или отмените выбор профиля".into(),
         ));
     }
+    state.cancel_requested.store(false, Ordering::SeqCst);
+    state.dialog_mode.store(dialog, Ordering::SeqCst);
     let status = LaunchStatus {
         request_id: Some(uuid::Uuid::new_v4()),
         game_id: Some(game_id),
@@ -75,7 +116,13 @@ pub async fn begin(app: &tauri::AppHandle, game_id: GameId) -> ApiResult<LaunchS
         ..Default::default()
     };
     state.publish(app, status);
+    if dialog {
+        show_dialog(app)?;
+    }
     let result = prepare(app, game_id).await;
+    if state.cancel_requested.load(Ordering::SeqCst) {
+        return Ok(state.status());
+    }
     if let Err(error) = &result {
         let mut status = state.status();
         status.phase = "error".into();
@@ -136,10 +183,13 @@ async fn prepare(app: &tauri::AppHandle, game_id: GameId) -> ApiResult<LaunchSta
                 .into(),
         );
     }
+    if state.cancel_requested.load(Ordering::SeqCst) {
+        return Ok(state.status());
+    }
     if plan.needs_profile {
         status.phase = "awaitingProfile".into();
-        state.publish(app, status.clone());
-        Ok(status)
+        state.publish(app, status);
+        Ok(state.status())
     } else {
         state.publish(app, status);
         execute(
@@ -180,6 +230,10 @@ async fn execute(
     game_id: GameId,
     profile_id: ProfileId,
 ) -> ApiResult<LaunchStatus> {
+    let state = app.state::<Launches>();
+    if !state.starting(app) {
+        return Ok(state.status());
+    }
     let workflow = app.state::<Arc<LaunchGame>>().inner().clone();
     let pid = tauri::async_runtime::spawn_blocking(move || workflow.execute(game_id, profile_id))
         .await
@@ -222,14 +276,57 @@ pub fn game_argument(args: &[String]) -> Result<Option<GameId>, String> {
         .map_err(|_| "Некорректный UUID игры в ярлыке".into())
 }
 
+fn show_dialog(app: &tauri::AppHandle) -> ApiResult<()> {
+    let window = app
+        .get_webview_window("launch")
+        .ok_or_else(|| ApiError::Internal("Диалог запуска недоступен".into()))?;
+    window
+        .show()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    window
+        .unminimize()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    window
+        .set_focus()
+        .map_err(|e| ApiError::Internal(e.to_string()))
+}
+
+/// The state lock makes cancellation atomic with the transition to OS spawn.
+/// Cancelling preparation never starts a game after a delayed update response.
+pub fn cancel(app: &tauri::AppHandle, request_id: Option<uuid::Uuid>) -> ApiResult<()> {
+    let state = app.state::<Launches>();
+    let next = {
+        let mut status = state.status.lock().unwrap();
+        if request_id.is_some() && status.request_id != request_id {
+            return Err(ApiError::Rejected("Запрос запуска уже изменился".into()));
+        }
+        if matches!(status.phase.as_str(), "preparing" | "awaitingProfile") {
+            state.cancel_requested.store(true, Ordering::SeqCst);
+            status.phase = "cancelled".into();
+            status.error = None;
+        } else if status.phase == "starting" && request_id.is_none() {
+            // OS spawn may already be in flight. If it fails, do not reopen a
+            // profile picker that the user has just dismissed.
+            state.cancel_requested.store(true, Ordering::SeqCst);
+        } else if request_id.is_some() {
+            return Err(ApiError::Rejected("Запрос запуска уже изменился".into()));
+        }
+        status.clone()
+    };
+    state.publish(app, next);
+    Ok(())
+}
+
 pub fn handle_arguments(app: tauri::AppHandle, args: Vec<String>) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+    if !args.iter().any(|arg| arg == "--launch-game") {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+        return;
     }
     tauri::async_runtime::spawn(async move {
-        // A second invocation can arrive while the first instance is still in setup.
         for _ in 0..100 {
             if app.try_state::<LaunchReady>().is_some() {
                 break;
@@ -238,7 +335,7 @@ pub fn handle_arguments(app: tauri::AppHandle, args: Vec<String>) {
         }
         let result = match game_argument(&args) {
             Ok(Some(id)) if app.try_state::<LaunchReady>().is_some() => {
-                begin(&app, id).await.map(|_| ())
+                begin_internal(&app, id, true).await.map(|_| ())
             }
             Ok(Some(_)) => Err(ApiError::Rejected(
                 "SaveHub ещё запускается. Повторите запуск ярлыка".into(),
@@ -248,12 +345,14 @@ pub fn handle_arguments(app: tauri::AppHandle, args: Vec<String>) {
         };
         if let Err(error) = result {
             let state = app.state::<Launches>();
+            state.dialog_mode.store(true, Ordering::SeqCst);
             let mut status = state.status();
             status.error = Some(error_message(&error));
             if status.phase == "idle" {
                 status.phase = "error".into();
             }
             state.publish(&app, status);
+            let _ = show_dialog(&app);
         }
     });
 }

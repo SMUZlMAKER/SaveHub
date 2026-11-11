@@ -156,7 +156,7 @@ export interface LaunchStatus {
   requestId: string | null;
   gameId: string | null;
   gameName: string | null;
-  phase: 'idle' | 'preparing' | 'awaitingProfile' | 'running' | 'stopped' | 'cancelled' | 'error';
+  phase: 'idle' | 'preparing' | 'starting' | 'awaitingProfile' | 'running' | 'stopped' | 'cancelled' | 'error';
   profiles: LaunchProfile[];
   activeProfileId: string | null;
   warnings: string[];

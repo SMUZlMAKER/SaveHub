@@ -105,17 +105,16 @@ pub async fn confirm_game_launch(
 
 #[tauri::command]
 pub async fn cancel_game_launch(app: tauri::AppHandle, request_id: uuid::Uuid) -> ApiResult<()> {
-    let state = app.state::<Launches>();
-    let _guard = state
-        .operation
-        .try_lock()
-        .map_err(|_| ApiError::Rejected("Подготовка запуска ещё выполняется".into()))?;
-    let mut status = state.status();
-    if status.request_id != Some(request_id) || status.phase != "awaitingProfile" {
-        return Err(ApiError::Rejected("Запрос запуска уже изменился".into()));
+    crate::app::launch::cancel(&app, Some(request_id))
+}
+
+#[tauri::command]
+pub async fn dismiss_launch_dialog(app: tauri::AppHandle) -> ApiResult<()> {
+    crate::app::launch::cancel(&app, None)?;
+    if let Some(window) = app.get_webview_window("launch") {
+        window
+            .hide()
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
-    status.phase = "cancelled".into();
-    status.error = None;
-    state.publish(&app, status);
     Ok(())
 }
