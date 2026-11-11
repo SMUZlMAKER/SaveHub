@@ -15,6 +15,12 @@ pub struct Profile {
     pub last_played_game: Option<GameId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryConfig {
+    pub url: String,
+    pub path: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsData {
     pub repo_url: Option<String>,

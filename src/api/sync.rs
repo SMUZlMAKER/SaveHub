@@ -8,7 +8,8 @@ use super::{ApiError, ApiResult};
 #[serde(rename_all = "camelCase")]
 pub struct SyncStatusDto {
     pub state: SyncState,
-    /// Unix-время последней успешной синхронизации в миллисекундах.
+    /// Unix-время последнего успешного fetch/push без ошибок и ожидающих отправки коммитов.
+    /// В миллисекундах; не означает применение удалённых сохранений.
     pub last_sync_at: Option<u64>,
     /// Текст ошибки, если `state = Error`.
     pub error: Option<String>,
@@ -24,17 +25,30 @@ pub enum SyncState {
     Error,
 }
 
-/// TODO(backend): состояние RepoWorker.
 #[tauri::command]
-pub fn get_sync_status() -> ApiResult<SyncStatusDto> {
-    Err(ApiError::NotImplemented("get_sync_status"))
+pub fn get_sync_status(
+    runtime: tauri::State<'_, std::sync::Arc<crate::domain::RuntimeState>>,
+) -> ApiResult<SyncStatusDto> {
+    let status = runtime.sync_status();
+    let state = match status.state {
+        crate::domain::SyncState::NotConfigured => SyncState::NotConfigured,
+        crate::domain::SyncState::Idle => SyncState::Idle,
+        crate::domain::SyncState::Syncing => SyncState::Syncing,
+        crate::domain::SyncState::Error => SyncState::Error,
+    };
+
+    Ok(SyncStatusDto {
+        state,
+        last_sync_at: status.last_sync_at,
+        error: status.error,
+    })
 }
 
-/// TODO(backend): попросить RepoWorker синхронизироваться, не дожидаясь таймера.
-/// Ход синхронизации фронт узнает из `events::SYNC_STATUS_CHANGED`.
 #[tauri::command]
-pub async fn sync_now() -> ApiResult<()> {
-    Err(ApiError::NotImplemented("sync_now"))
+pub fn sync_now(
+    worker: tauri::State<'_, crate::background::repo::RepoWorkerHandle>,
+) -> ApiResult<()> {
+    worker.sync_now().map_err(Into::into)
 }
 
 #[derive(Debug, Serialize)]

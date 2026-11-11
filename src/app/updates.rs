@@ -89,6 +89,9 @@ impl Updates {
         let _operation = self.operation.try_lock().map_err(|_| {
             ApiError::Rejected("Обновление уже проверяется или устанавливается".into())
         })?;
+        if self.status().phase == "restartRequired" {
+            return Ok(self.status());
+        }
         let Some(key) = PUBLIC_KEY.filter(|key| !key.trim().is_empty()) else {
             return Err(ApiError::Rejected(
                 "В этой сборке не настроен ключ обновлений".into(),
@@ -145,6 +148,10 @@ impl Updates {
         let _operation = self.operation.try_lock().map_err(|_| {
             ApiError::Rejected("Обновление уже проверяется или устанавливается".into())
         })?;
+        if self.status().phase == "restartRequired" {
+            app.exit(tauri::RESTART_EXIT_CODE);
+            return Ok(());
+        }
         let update = self
             .pending
             .lock()
@@ -157,16 +164,33 @@ impl Updates {
             s.error = None;
         }
         self.publish(app);
-        if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
+        let result = async {
+            let bytes = update.download(|_, _| {}, || {}).await.map_err(internal)?;
+            let worker = app
+                .state::<crate::background::repo::RepoWorkerHandle>()
+                .inner()
+                .clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let _pause = worker.pause_after_flush().map_err(ApiError::from)?;
+                update.install(bytes).map_err(internal)
+            })
+            .await
+            .map_err(internal)?
+        }
+        .await;
+        if let Err(error) = result {
             {
-                let mut s = self.status.lock().unwrap();
-                s.phase = "error".into();
-                s.error = Some(e.to_string());
+                let mut status = self.status.lock().unwrap();
+                status.phase = "error".into();
+                status.error = Some(format!("Не удалось установить обновление: {error:?}"));
             }
             self.publish(app);
-            return Err(internal(e));
+            return Err(error);
         }
-        app.restart();
+        self.status.lock().unwrap().phase = "restartRequired".into();
+        self.publish(app);
+        app.exit(tauri::RESTART_EXIT_CODE);
+        Ok(())
     }
 }
 

@@ -2,12 +2,29 @@ use super::ServiceResult;
 use crate::domain::*;
 use std::sync::Arc;
 
-pub struct RepoService;
+pub struct RepoService {
+    catalog: Arc<Catalog>,
+    runtime: Arc<RuntimeState>,
+    settings: Arc<Settings>,
+}
 
 #[allow(unused_variables)]
 impl RepoService {
     pub fn new(catalog: Arc<Catalog>, runtime: Arc<RuntimeState>, settings: Arc<Settings>) -> Self {
-        todo!()
+        Self {
+            catalog,
+            runtime,
+            settings,
+        }
+    }
+
+    pub fn configuration(&self) -> Option<RepositoryConfig> {
+        let settings = self.settings.data();
+        let url = settings.repo_url.filter(|url| !url.trim().is_empty())?;
+        let path = settings
+            .local_repo_path
+            .filter(|path| !path.as_os_str().is_empty())?;
+        Some(RepositoryConfig { url, path })
     }
 
     /// Подготовить репозиторий сохранений и общее хранилище каталога.
@@ -21,7 +38,7 @@ impl RepoService {
     }
 
     pub fn status(&self) -> ServiceResult<SyncStatus> {
-        todo!()
+        Ok(self.runtime.sync_status())
     }
 
     /// Обновить удалённые ссылки, не меняя рабочие сохранения.
@@ -45,6 +62,12 @@ impl RepoService {
 
     /// Повторная отправка не создаёт новое сохранение или коммит.
     pub fn push(&self, profile_id: &str) -> ServiceResult<()> {
+        todo!()
+    }
+
+    /// Проверить локальные refs: есть ли коммиты, ещё не отправленные в upstream.
+    /// Без сети; ветка с коммитами без upstream также требует первой отправки.
+    pub fn has_unpushed_commits(&self, profile_id: &str) -> ServiceResult<bool> {
         todo!()
     }
 
@@ -72,5 +95,36 @@ impl RepoService {
     /// Снять собственный маркер.
     pub fn release_lease(&self, profile_id: &str) -> ServiceResult<()> {
         todo!()
+    }
+}
+
+/// Called under the shared operations mutex; do not lock it again or call UI code.
+pub trait RepoOperations: Send + Sync + 'static {
+    fn configuration(&self) -> Option<RepositoryConfig>;
+    fn checkpoint(&self, profile: &ProfileId) -> ServiceResult<Option<CommitId>>;
+    fn push(&self, profile: &ProfileId) -> ServiceResult<()>;
+    fn fetch(&self) -> ServiceResult<()>;
+    fn has_unpushed_commits(&self, profile: &ProfileId) -> ServiceResult<bool>;
+}
+
+impl RepoOperations for RepoService {
+    fn configuration(&self) -> Option<RepositoryConfig> {
+        self.configuration()
+    }
+
+    fn has_unpushed_commits(&self, profile: &ProfileId) -> ServiceResult<bool> {
+        self.has_unpushed_commits(&profile.to_string())
+    }
+
+    fn checkpoint(&self, profile: &ProfileId) -> ServiceResult<Option<CommitId>> {
+        self.checkpoint(&profile.to_string(), "SaveHub: automatic checkpoint")
+    }
+
+    fn push(&self, profile: &ProfileId) -> ServiceResult<()> {
+        self.push(&profile.to_string())
+    }
+
+    fn fetch(&self) -> ServiceResult<()> {
+        self.fetch()
     }
 }

@@ -1,19 +1,37 @@
-use std::{collections::HashMap, sync::Arc};
-use tauri::{Manager, WindowEvent};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 
 use crate::adapters::config;
 use crate::api;
 use crate::app::tray;
+use crate::background::repo::{RepoWorker, RepoWorkerOptions};
 use crate::domain::{
     Catalog, LocalConfig, RuntimeState, Settings, SettingsData, SyncState, SyncStatus,
 };
-use crate::services::{game::GameService, profile::ProfileService, settings::SettingsService};
+use crate::services::{
+    game::GameService, profile::ProfileService, repo::RepoService, settings::SettingsService,
+};
+use crate::workflows::SyncRepository;
 
 pub fn start() {
     crate::adapters::app_identity::initialize()
         .expect("Не удалось настроить идентификацию SaveHub в Windows");
-    // TODO: прочитать конфигурацию, создать хранилища и сервисы, запустить RepoWorker (см. app/mod.rs)
-    tauri::Builder::default()
+    let worker = Arc::new(Mutex::new(None::<RepoWorker>));
+    let worker_for_setup = worker.clone();
+    let shutdown_complete = Arc::new(AtomicBool::new(true));
+
+    let shutdown_for_setup = shutdown_complete.clone();
+
+    let app = tauri::Builder::default()
         .manage(crate::app::launch::Launches::default())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if !args.iter().any(|arg| arg == "--autostart") {
@@ -67,7 +85,7 @@ pub fn start() {
             api::updates::check_for_updates,
             api::updates::install_update,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let settings_path = data_dir.join("settings.json");
@@ -119,9 +137,11 @@ pub fn start() {
                     error: None,
                 },
             ));
+            let operations = Arc::new(Mutex::new(()));
             app.manage(Arc::new(SettingsService::new(
                 settings.clone(),
                 settings_path,
+                operations.clone(),
             )));
             let game_service = Arc::new(GameService::new(
                 catalog.clone(),
@@ -129,6 +149,11 @@ pub fn start() {
                 settings.clone(),
             ));
             let profile_service = Arc::new(ProfileService::new(
+                catalog.clone(),
+                runtime.clone(),
+                settings.clone(),
+            ));
+            let repo_service = Arc::new(RepoService::new(
                 catalog.clone(),
                 runtime.clone(),
                 settings.clone(),
@@ -147,8 +172,10 @@ pub fn start() {
             app.manage(game_service);
             app.manage(profile_service);
             app.manage(settings);
+            app.manage(repo_service.clone());
+            app.manage(operations.clone());
             app.manage(catalog);
-            app.manage(runtime);
+            app.manage(runtime.clone());
             tray::setup(app.handle())?;
             app.manage(crate::app::updates::Updates::load(app.handle())?);
             app.manage(crate::app::launch::LaunchReady);
@@ -158,6 +185,21 @@ pub fn start() {
                 }
             }
             crate::background::processes::spawn(app.handle().clone());
+            let mut sync_changes = runtime.subscribe_sync_status();
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while sync_changes.changed().await.is_ok() {
+                    let _ = app_handle.emit(api::events::SYNC_STATUS_CHANGED, ());
+                    tray::refresh_sync_status(&app_handle);
+                }
+            });
+
+            let sync = SyncRepository::new(repo_service, runtime, operations);
+            let repo_worker = RepoWorker::start(sync, RepoWorkerOptions::default())?;
+            app.manage(repo_worker.handle());
+            *worker_for_setup.lock().expect("RepoWorker state poisoned") = Some(repo_worker);
+            shutdown_for_setup.store(false, Ordering::Release);
+
             crate::background::updates::spawn(app.handle().clone());
             let args: Vec<String> = std::env::args().collect();
             if args.iter().any(|arg| arg == "--launch-game") {
@@ -173,6 +215,74 @@ pub fn start() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("не удалось запустить tauri-приложение");
+
+    app.run(move |app, event| {
+        if let RunEvent::ExitRequested { api, code, .. } = event {
+            if shutdown_complete.load(Ordering::Acquire) {
+                return;
+            }
+
+            api.prevent_exit();
+            let repo_worker = worker.lock().expect("RepoWorker state poisoned").take();
+            let Some(mut repo_worker) = repo_worker else {
+                // None also means another exit request is already joining the worker.
+                return;
+            };
+            let app = app.clone();
+            let shutdown_complete = shutdown_complete.clone();
+            let worker = worker.clone();
+
+            tauri::async_runtime::spawn_blocking(move || {
+                loop {
+                    match repo_worker.shutdown() {
+                        Ok(()) => break,
+                        Err(error) => {
+                            eprintln!("Не удалось завершить синхронизацию: {error:?}");
+                            match shutdown_decision(&app) {
+                                ShutdownDecision::Retry => continue,
+                                ShutdownDecision::Exit => break,
+                                ShutdownDecision::Stay => {
+                                    *worker.lock().expect("RepoWorker state poisoned") =
+                                        Some(repo_worker);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                drop(repo_worker);
+                shutdown_complete.store(true, Ordering::Release);
+                if code == Some(tauri::RESTART_EXIT_CODE) {
+                    app.request_restart();
+                } else {
+                    app.exit(code.unwrap_or(0));
+                }
+            });
+        }
+    });
+}
+
+enum ShutdownDecision {
+    Retry,
+    Exit,
+    Stay,
+}
+
+fn shutdown_decision(app: &tauri::AppHandle) -> ShutdownDecision {
+    const RETRY: &str = "Повторить";
+    const EXIT: &str = "Выйти без синхронизации";
+    let result = app.dialog()
+        .message("Не удалось завершить синхронизацию сохранений. Можно повторить попытку или остаться в приложении. При выходе сейчас последние изменения могут остаться без контрольной точки и отправки на другой ПК.")
+        .title("Синхронизация не завершена")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::YesNoCancelCustom(RETRY.into(), EXIT.into(), "Остаться".into()))
+        .blocking_show_with_result();
+    match result {
+        MessageDialogResult::Custom(label) if label == RETRY => ShutdownDecision::Retry,
+        MessageDialogResult::Custom(label) if label == EXIT => ShutdownDecision::Exit,
+        _ => ShutdownDecision::Stay,
+    }
 }

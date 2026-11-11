@@ -69,6 +69,7 @@
   <p role="status">
     {#if status.phase === 'checking'}Проверяем обновления…
     {:else if status.phase === 'installing'}Загружаем и устанавливаем обновление…
+    {:else if status.phase === 'restartRequired'}Обновление установлено. Перезапустите SaveHub, когда сохранения будут синхронизированы.
     {:else if status.phase === 'upToDate'}Установлена последняя версия.
     {:else if status.phase === 'error'}{status.error}
     {:else if status.version}Доступна версия {status.version}.
@@ -78,7 +79,9 @@
   {#if status.notes}<details><summary>Что нового</summary><p style="white-space: pre-wrap">{status.notes}</p></details>{/if}
   <div class="actions">
     <button onclick={check} disabled={working || !status.configured}>Проверить обновления</button>
-    {#if status.version}<button class="primary" onclick={() => { confirming = true }} disabled={working}>Установить {status.version}</button>{/if}
+    {#if status.phase === 'restartRequired'}
+      <button class="primary" onclick={install} disabled={working}>Перезапустить</button>
+    {:else if status.version}<button class="primary" onclick={() => { confirming = true }} disabled={working}>Установить {status.version}</button>{/if}
   </div>
   {#if confirming}
     <p>SaveHub закроется для установки обновления и запустится снова. Продолжить?</p>

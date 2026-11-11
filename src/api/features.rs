@@ -32,10 +32,6 @@ mod tests {
     #[test]
     fn unavailable_read_operations_do_not_report_demo_success() {
         assert!(matches!(
-            sync::get_sync_status(),
-            Err(ApiError::NotImplemented(_))
-        ));
-        assert!(matches!(
             sync::list_conflicts(),
             Err(ApiError::NotImplemented(_))
         ));

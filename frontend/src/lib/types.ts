@@ -80,7 +80,7 @@ export type SyncState = "notConfigured" | "idle" | "syncing" | "error";
 
 export interface SyncStatus {
   state: SyncState;
-  /** Unix-время, мс */
+  /** Последний успешный fetch/push без ошибок и ожидающих отправки коммитов, Unix-мс. Не означает применение сохранений. */
   lastSyncAt: number | null;
   error: string | null;
 }
@@ -140,6 +140,7 @@ export interface UpdateStatus {
     | "available"
     | "upToDate"
     | "installing"
+    | "restartRequired"
     | "error";
   version: string | null;
   notes: string | null;
