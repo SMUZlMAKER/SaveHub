@@ -107,6 +107,7 @@ export type ConflictResolution =
   | "keepBothRemoteFirst";
 
 export interface Settings {
+  catalogRepoUrl: string | null;
   repoUrl: string | null;
   localRepoPath: string | null;
   hasGithubToken: boolean;

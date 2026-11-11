@@ -87,6 +87,8 @@ export const api = {
   checkForUpdates: () => call<UpdateStatus>("check_for_updates"),
   installUpdate: () => call<void>("install_update"),
   // src/api/games.rs
+  getCatalogStatus: () => call<SyncStatus>("get_catalog_status"),
+  syncCatalog: () => call<void>("sync_catalog"),
   listGames: () => call<Game[]>("list_games"),
   getGameStatus: (gameId: string) =>
     call<Game["status"]>("get_game_status", { gameId }),

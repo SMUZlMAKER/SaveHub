@@ -2,6 +2,28 @@ use super::{ServiceError, ServiceResult};
 use crate::domain::*;
 use std::sync::{Arc, Mutex};
 
+pub fn validate_catalog_url(url: &str) -> ServiceResult<()> {
+    let path = url.strip_prefix("https://github.com/").ok_or_else(|| {
+        ServiceError::InvalidInput("Каталог: укажите HTTPS-адрес репозитория на github.com".into())
+    })?;
+    let parts: Vec<_> = path.split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || *part == "."
+                || *part == ".."
+                || !part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+    {
+        return Err(ServiceError::InvalidInput(
+            "Ожидается https://github.com/owner/repository".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct SettingsService {
     settings: Arc<Settings>,
     path: std::path::PathBuf,
@@ -29,6 +51,22 @@ impl SettingsService {
             .map_err(|_| ServiceError::Conflict("Repository operations lock poisoned".into()))?;
         let mut data = self.settings.data();
         change(&mut data);
+        data.catalog_repo_url = data
+            .catalog_repo_url
+            .map(|url| url.trim().trim_end_matches('/').to_owned())
+            .filter(|url| !url.is_empty());
+        if let Some(url) = &data.catalog_repo_url {
+            validate_catalog_url(url)?;
+            if data.repo_url.as_deref().is_some_and(|s| {
+                s.trim()
+                    .trim_end_matches('/')
+                    .trim_end_matches(".git")
+                    .eq_ignore_ascii_case(url.trim_end_matches(".git"))
+            }) {
+                return Err(ServiceError::InvalidInput("Для списка игр нужен отдельный репозиторий, отличный от репозитория сохранений".into()));
+            }
+        }
+
         crate::adapters::config::write_settings(&self.path, &data)
             .map_err(ServiceError::Adapter)?;
         self.settings.replace_data(data);
@@ -48,6 +86,10 @@ impl SettingsService {
             data.repo_url = url;
             data.local_repo_path = path;
         })
+    }
+
+    pub fn set_catalog_repository(&self, url: Option<String>) -> ServiceResult<()> {
+        self.update(|data| data.catalog_repo_url = url)
     }
 
     pub fn set_sync_after_session(&self, enabled: bool) -> ServiceResult<()> {
@@ -82,3 +124,104 @@ impl SettingsService {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use crate::adapters::config;
+    use std::{collections::HashMap, path::PathBuf};
+
+    struct Fixture {
+        root: PathBuf,
+        service: SettingsService,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("savehub-settings-{}", uuid::Uuid::new_v4()));
+            let service = SettingsService::new(
+                Arc::new(Settings::new(
+                    SettingsData {
+                        ask_profile_before_launch: true,
+                        catalog_repo_url: None,
+                        repo_url: None,
+                        local_repo_path: None,
+                        sync_after_session: false,
+                        sync_while_gaming: false,
+                        auto_switch_profile: false,
+                        start_minimized: true,
+                    },
+                    LocalConfig {
+                        machine_id: "test".into(),
+                        games: HashMap::new(),
+                    },
+                )),
+                root.join("settings.json"),
+                Arc::new(Mutex::new(())),
+            );
+            service.update(|_| {}).unwrap();
+            Self { root, service }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn invalid_update_changes_neither_memory_nor_disk() {
+        let fixture = Fixture::new();
+        let before = std::fs::read(&fixture.service.path).unwrap();
+        assert!(
+            fixture
+                .service
+                .update(|data| {
+                    data.repo_url = Some("https://github.com/owner/saves".into());
+                    data.catalog_repo_url = Some("https://example.com/owner/catalog".into());
+                    data.sync_after_session = true;
+                })
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&fixture.service.path).unwrap(), before);
+        assert!(fixture.service.get().unwrap().repo_url.is_none());
+        assert!(!fixture.service.get().unwrap().sync_after_session);
+        fixture
+            .service
+            .set_catalog_repository(Some("https://github.com/owner/catalog".into()))
+            .unwrap();
+        assert!(
+            fixture
+                .service
+                .set_repository(Some("https://github.com/OWNER/catalog.git".into()), None)
+                .is_err()
+        );
+        assert!(fixture.service.get().unwrap().repo_url.is_none());
+    }
+
+    #[test]
+    fn write_failure_does_not_publish_settings_to_memory() {
+        let fixture = Fixture::new();
+        std::fs::remove_file(&fixture.service.path).unwrap();
+        std::fs::create_dir(&fixture.service.path).unwrap();
+        assert!(fixture.service.set_sync_after_session(true).is_err());
+        assert!(!fixture.service.get().unwrap().sync_after_session);
+    }
+
+    #[test]
+    fn parallel_updates_keep_both_changes_on_disk() {
+        let fixture = Fixture::new();
+        std::thread::scope(|scope| {
+            scope.spawn(|| fixture.service.set_sync_after_session(true).unwrap());
+            scope.spawn(|| fixture.service.set_sync_while_gaming(true).unwrap());
+        });
+        let saved = config::read_settings(&fixture.service.path)
+            .unwrap()
+            .unwrap();
+        assert!(saved.sync_after_session && saved.sync_while_gaming && saved.start_minimized);
+        assert_eq!(
+            serde_json::to_value(saved).unwrap(),
+            serde_json::to_value(fixture.service.get().unwrap()).unwrap()
+        );
+    }
+}

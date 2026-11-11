@@ -22,6 +22,10 @@ impl Catalog {
         inner.games.clone()
     }
 
+    pub fn replace_games(&self, games: HashMap<GameId, Game>) {
+        self.inner.write().expect("Catalog lock poisoned").games = games;
+    }
+
     /// Добавить игру или заменить существующую по её ID.
     pub fn add_game(&self, game: Game) {
         let mut inner = self.inner.write().expect("Catalog lock poisoned");
@@ -257,6 +261,14 @@ impl Settings {
         inner.set_repository(url, path);
     }
 
+    pub fn replace_data(&self, data: SettingsData) {
+        self.inner.write().expect("Settings lock poisoned").data = data;
+    }
+
+    pub fn replace_local(&self, local: LocalConfig) {
+        self.inner.write().expect("Settings lock poisoned").local = local;
+    }
+
     pub fn set_sync_after_session(&self, enabled: bool) {
         let mut inner = self.inner.write().expect("Settings lock poisoned");
         inner.data.sync_after_session = enabled;
@@ -315,6 +327,7 @@ mod tests {
     fn settings() -> Settings {
         Settings::new(
             SettingsData {
+                catalog_repo_url: None,
                 repo_url: None,
                 local_repo_path: None,
                 sync_after_session: false,

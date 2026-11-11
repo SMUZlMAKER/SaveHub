@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, describeError, events, subscribe } from '../lib/api'
-  import type { AppFeatures, Game, GameStatus } from '../lib/types'
+  import type { AppFeatures, Game, GameStatus, SyncStatus } from '../lib/types'
   import FirstRun from '../lib/components/FirstRun.svelte'
   let { features, onsettings }: { features: AppFeatures; onsettings: () => void } = $props()
 
@@ -15,6 +15,8 @@
     ignored: { text: 'Игнорируется', tone: '' },
   }
   let games = $state<Game[]>([])
+  let catalogStatus = $state<SyncStatus | null>(null)
+  let syncing = $state(false)
   let loading = $state(true)
   let loadError = $state('')
   let savedNote = $state('')
@@ -37,16 +39,24 @@
     const current = ++generation
     loading = true; loadError = ''
     try {
-      const result = await api.listGames()
-      if (current === generation) games = result
+      const [result, status] = await Promise.all([api.listGames(), api.getCatalogStatus()])
+      if (current === generation) { games = result; catalogStatus = status }
     } catch (e) { if (current === generation) loadError = describeError(e) }
     finally { if (current === generation) loading = false }
   }
-  function saved(game: Game) {
+  async function saved(game: Game) {
     // Do not hide a successful mutation behind a failing refresh or a late list response.
     generation++; loading = false; loadError = ''
     games = [...games.filter(g => g.id !== game.id), game].sort((a, b) => a.name.localeCompare(b.name))
-    editor = null; savedNote = features.persistentGames ? `Настройки «${game.name}» сохранены.` : `Настройки «${game.name}» применены для текущего запуска приложения.`
+    editor = null; savedNote = `Настройки «${game.name}» сохранены на этом ПК.`
+    try { catalogStatus = await api.getCatalogStatus() }
+    catch (e) { catalogStatus = { state: 'error', lastSyncAt: null, error: describeError(e) } }
+  }
+  async function sync() {
+    syncing = true
+    try { await api.syncCatalog(); await load() }
+    catch (e) { await load(); catalogStatus = { state: 'error', lastSyncAt: null, error: describeError(e) } }
+    finally { syncing = false }
   }
   function edit(mode: 'add' | 'edit', game?: Game) {
     savedNote = ''; editor = { mode, game }
@@ -59,7 +69,13 @@
   <button class="primary" disabled={editor !== null || loading || !!loadError} onclick={() => edit('add')}>Добавить игру</button>
 </div>
 {#if !editor}<FirstRun {features} gamesCount={games.length} gamesLoading={loading} gamesError={loadError} {onsettings} onadd={() => edit('add')} adding={editor !== null} />{/if}
-{#if !features.persistentGames}<p class="setup-note">В этой версии список игр и локальные пути сохраняются только до закрытия приложения. Файлы игр и сохранений не изменяются.</p>{/if}
+<div class="setup-note" aria-live="polite">
+  {#if catalogStatus?.error}<p class="error">{catalogStatus.error}</p>
+  {:else if catalogStatus?.state === 'notConfigured'}<p>Список сохранён на этом ПК. Для обмена между ПК подключите репозиторий списка игр в настройках.</p>
+  {:else if catalogStatus?.state === 'syncing'}<p>Обновляем список игр…</p>
+  {:else if catalogStatus?.lastSyncAt}<p>Список игр синхронизирован: {new Date(catalogStatus.lastSyncAt).toLocaleString()}.</p>{/if}
+  <button onclick={sync} disabled={syncing || !!editor}>{syncing ? 'Обновляем…' : 'Синхронизировать список'}</button>
+</div>
 {#if savedNote}<p class="success-note" role="status">{savedNote}</p>{/if}
 {#if editor}
   {#key `${editor.mode}:${editor.game?.id ?? 'new'}`}

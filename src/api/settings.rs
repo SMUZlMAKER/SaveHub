@@ -11,7 +11,9 @@ use crate::services::settings::SettingsService;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsDto {
-    /// Удаленный репозиторий для сохранений, например `https://github.com/user/saves`.
+    /// Отдельный репозиторий списка игр.
+    pub catalog_repo_url: Option<String>,
+    /// Удаленный репозиторий сохранений.
     pub repo_url: Option<String>,
     /// Локальный клон этого репозитория.
     pub local_repo_path: Option<String>,
@@ -28,6 +30,7 @@ pub struct SettingsDto {
 pub fn get_settings(service: State<'_, Arc<SettingsService>>) -> ApiResult<SettingsDto> {
     let data = service.get()?;
     Ok(SettingsDto {
+        catalog_repo_url: data.catalog_repo_url,
         repo_url: data.repo_url,
         local_repo_path: data
             .local_repo_path
@@ -50,6 +53,7 @@ pub async fn update_settings(
     let service = service.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         service.update(|data| {
+            data.catalog_repo_url = settings.catalog_repo_url;
             data.repo_url = settings.repo_url;
             data.local_repo_path = settings.local_repo_path.map(std::path::PathBuf::from);
             data.sync_after_session = settings.sync_after_session;
@@ -64,7 +68,7 @@ pub async fn update_settings(
     Ok(())
 }
 
-/// TODO(backend): положить токен в системное хранилище (Windows Credential Manager), не в файл настроек.
+/// Токен сохраняется отдельно в Windows Credential Manager.
 #[tauri::command]
 pub fn set_github_token(
     token: String,

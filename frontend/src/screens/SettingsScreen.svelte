@@ -88,6 +88,13 @@
         <input bind:value={settings.localRepoPath} />
       </label>
 
+      <h3>Список игр</h3>
+      <label class="field">
+        <span class="muted">Отдельный репозиторий списка игр</span>
+        <input bind:value={settings.catalogRepoUrl} placeholder="https://github.com/user/game-catalog" />
+      </label>
+      <p class="muted">Создайте пустой репозиторий без README. Список обновляется автоматически; без подключения он хранится на этом ПК.</p>
+
       <h3>Передача сохранений между ПК</h3>
       <p class="muted">Автоматическая отправка и получение сохранений ещё не реализованы. Эти параметры сохраняются для будущего подключения синхронизации.</p>
       <ul class="list settings-list">
