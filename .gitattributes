@@ -4,12 +4,14 @@
 # Explicitly ensure source files are LF
 *.rs text eol=lf
 *.js text eol=lf
+*.mjs text eol=lf
 *.ts text eol=lf
 
 *.lock text eol=lf
 
 *.toml text eol=lf
 *.yaml text eol=lf
+*.yml text eol=lf
 *.json text eol=lf
 
 *.md text eol=lf

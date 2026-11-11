@@ -6,11 +6,30 @@ import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 const workflow = readFileSync(new URL('../workflows/windows.yml', import.meta.url), 'utf8')
-const source = workflow.split('      - name: Publish installer\n')[1].split('          script: |\n')[1]
-  .split('\n').map(line => line.replace(/^ {12}/, '')).join('\n')
+function publisherSource(text) {
+  const normalized = text.replace(/\r\n?/g, '\n')
+  const step = normalized.split('      - name: Publish installer\n')[1]
+  assert.ok(step, 'Workflow must contain the Publish installer step')
+  const script = step.split('          script: |\n')[1]
+  assert.ok(script, 'Publish installer must contain an inline script')
+  return script.split('\n').map(line => line.replace(/^ {12}/, '')).join('\n')
+}
+const source = publisherSource(workflow)
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const publish = new AsyncFunction('require', 'github', 'context', 'core', 'process', source)
 const sha = '0123456789abcdef0123456789abcdef01234567'
+
+for (const eol of ['\n', '\r\n']) {
+  test(`extracts publisher with ${eol === '\n' ? 'LF' : 'CRLF'} checkout`, () => {
+    const variant = workflow.replace(/\r\n?/g, '\n').replace(/\n/g, eol)
+    assert.equal(publisherSource(variant), source)
+    assert.doesNotThrow(() => new AsyncFunction(publisherSource(variant)))
+  })
+}
+
+test('reports a missing publisher step clearly', () => {
+  assert.throws(() => publisherSource('name: Other workflow\n'), /Publish installer step/)
+})
 
 function fixture({ preview = false, previous, existing = false, signature = 'signed', lookupError, installer = 'SaveHub_0.2.2_x64-setup.exe' } = {}) {
   const calls = []
