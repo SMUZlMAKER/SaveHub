@@ -135,6 +135,14 @@ pub fn write_local_config(path: &Path, config: &LocalConfig) -> AdapterResult<()
     write_json(path, config)
 }
 
+pub fn read_active_profile(path: &Path) -> AdapterResult<Option<ProfileId>> {
+    read_json(path)
+}
+
+pub fn write_active_profile(path: &Path, profile: &ProfileId) -> AdapterResult<()> {
+    write_json(path, profile)
+}
+
 pub fn read_saves(path: &Path) -> AdapterResult<Option<Vec<Save>>> {
     read_json(path)
 }

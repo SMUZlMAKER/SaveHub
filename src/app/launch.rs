@@ -218,9 +218,25 @@ async fn execute(
         return Ok(state.status());
     }
     let workflow = app.state::<Arc<LaunchGame>>().inner().clone();
-    let pid = tauri::async_runtime::spawn_blocking(move || workflow.execute(game_id, profile_id))
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))??;
+    let launch_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        workflow.execute_guarded(game_id, profile_id, || {
+            !launch_app
+                .state::<Launches>()
+                .cancel_requested
+                .load(Ordering::SeqCst)
+        })
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    for event in [
+        crate::api::events::PROFILE_CHANGED,
+        crate::api::events::SAVES_CHANGED,
+        crate::api::events::CONFLICTS_CHANGED,
+    ] {
+        let _ = app.emit(event, ());
+    }
+    let pid = result?;
     let state = app.state::<Launches>();
     let mut status = state.status();
     status.phase = "running".into();

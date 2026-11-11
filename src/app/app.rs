@@ -131,9 +131,43 @@ pub fn start() {
                     last_played_game: None,
                 },
             );
+            if let Some(stored) = config::read_profiles(&data_dir.join("profiles.json"))
+                .map_err(|error| std::io::Error::other(format!("{error:?}")))?
+            {
+                profiles.clear();
+                let mut branches = std::collections::HashSet::new();
+                for profile in stored {
+                    if profile.name.trim().is_empty()
+                        || profile.branch.starts_with("savehub/")
+                        || !git2::Reference::is_valid_name(&format!(
+                            "refs/heads/{}",
+                            profile.branch
+                        ))
+                        || !branches.insert(profile.branch.clone())
+                        || profiles.insert(profile.id, profile).is_some()
+                    {
+                        return Err(std::io::Error::other(
+                            "Повреждён каталог профилей: неверные или повторяющиеся записи",
+                        )
+                        .into());
+                    }
+                }
+            }
+            let active = config::read_active_profile(&data_dir.join("active-profile.json"))
+                .map_err(|error| std::io::Error::other(format!("{error:?}")))?
+                .or_else(|| {
+                    profiles
+                        .contains_key(&uuid::Uuid::nil())
+                        .then_some(uuid::Uuid::nil())
+                });
+            if active.is_some_and(|id| !profiles.contains_key(&id)) {
+                return Err(
+                    std::io::Error::other("Активный профиль отсутствует в каталоге").into(),
+                );
+            }
             let catalog = Arc::new(Catalog::new(HashMap::new(), profiles));
             let runtime = Arc::new(RuntimeState::new(
-                Some(uuid::Uuid::nil()),
+                active,
                 Vec::new(),
                 SyncStatus {
                     state: SyncState::NotConfigured,
@@ -154,29 +188,51 @@ pub fn start() {
                     settings.clone(),
                     directory,
                 )
-                .map_err(|error| std::io::Error::other(format!("{error:?}")))?,
+                .map_err(|error| std::io::Error::other(format!("{error:?}")))?
+                .with_save_operations(operations.clone()),
             );
             let repo_service = Arc::new(RepoService::new(
                 catalog.clone(),
                 runtime.clone(),
                 settings.clone(),
             ));
-            let profile_service = Arc::new(ProfileService::with_operations(
-                catalog.clone(),
-                runtime.clone(),
-                repo_service.clone(),
-                operations.clone(),
-            ));
+            let profile_service = Arc::new(
+                ProfileService::with_operations(
+                    catalog.clone(),
+                    runtime.clone(),
+                    repo_service.clone(),
+                    operations.clone(),
+                )
+                .persistent(data_dir.clone()),
+            );
             let process_service = Arc::new(crate::services::process::ProcessService::new(
                 catalog.clone(),
                 runtime.clone(),
                 settings.clone(),
             ));
-            app.manage(Arc::new(crate::workflows::launch_game::LaunchGame::new(
-                process_service.clone(),
-                profile_service.clone(),
+            let saves = Arc::new(crate::services::save::SaveService::new(
+                catalog.clone(),
+                runtime.clone(),
                 settings.clone(),
-            )));
+            ));
+            let switch = Arc::new(crate::workflows::SwitchProfile::new(
+                game_service.clone(),
+                profile_service.clone(),
+                saves.clone(),
+                repo_service.clone(),
+                process_service.clone(),
+                operations.clone(),
+            ));
+            app.manage(Arc::new(
+                crate::workflows::launch_game::LaunchGame::new(
+                    process_service.clone(),
+                    profile_service.clone(),
+                    settings.clone(),
+                )
+                .with_saves(saves.clone(), switch.clone(), operations.clone()),
+            ));
+            app.manage(switch);
+            app.manage(saves);
             app.manage(process_service);
             app.manage(game_service.clone());
             app.manage(profile_service);

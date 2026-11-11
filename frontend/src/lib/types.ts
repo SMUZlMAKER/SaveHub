@@ -64,7 +64,8 @@ export type SaveKind =
   | "beforeSwitch"
   | "afterSession"
   | "conflict"
-  | "beforeRestore";
+  | "beforeRestore"
+  | "fileChanged";
 
 export interface SaveHistoryEntry {
   id: string;

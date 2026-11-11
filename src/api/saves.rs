@@ -3,7 +3,13 @@
 //! Эти команды являются IPC-контрактом приложения. Работа с файловой системой,
 //! git и сохранениями должна быть вынесена в SaveService и адаптеры.
 
+use crate::{
+    domain::{Catalog, GameId},
+    services::{process::ProcessService, save::SaveService},
+};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
+use tauri::{Emitter, State};
 
 use super::{ApiError, ApiResult};
 
@@ -46,34 +52,115 @@ pub enum SaveConflictResolution {
 
 /// GET /saves/{game}
 #[tauri::command]
-pub fn list_saves(game: String) -> ApiResult<Vec<SaveDto>> {
-    let _ = game;
-    Err(ApiError::NotImplemented("list_saves"))
+pub async fn list_saves(
+    game: GameId,
+    service: State<'_, Arc<SaveService>>,
+    operations: State<'_, Arc<Mutex<()>>>,
+) -> ApiResult<Vec<SaveDto>> {
+    let service = service.inner().clone();
+    let operations = operations.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operations
+            .lock()
+            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+        Ok(service
+            .list(Some(game), None)?
+            .into_iter()
+            .map(save_dto)
+            .collect())
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
 }
 
 /// POST /saves/{game}/choose
 #[tauri::command]
-pub async fn choose_save(game: String, choice: SaveChoice) -> ApiResult<()> {
-    let _ = (game, choice);
-    Err(ApiError::NotImplemented("choose_save"))
+pub async fn choose_save(
+    app: tauri::AppHandle,
+    game: GameId,
+    choice: SaveChoice,
+    service: State<'_, Arc<SaveService>>,
+    processes: State<'_, Arc<ProcessService>>,
+    operations: State<'_, Arc<Mutex<()>>>,
+) -> ApiResult<()> {
+    restore(
+        app,
+        Some(game),
+        choice.save_id,
+        service.inner().clone(),
+        processes.inner().clone(),
+        operations.inner().clone(),
+    )
+    .await
 }
 
 /// GET /saves/{game}/conflict
 #[tauri::command]
-pub fn get_save_conflict(game: String) -> ApiResult<Option<SaveConflictDto>> {
-    let _ = game;
-    Err(ApiError::NotImplemented("get_save_conflict"))
+pub async fn get_save_conflict(
+    game: GameId,
+    repo: State<'_, Arc<crate::services::repo::RepoService>>,
+    operations: State<'_, Arc<Mutex<()>>>,
+) -> ApiResult<Option<SaveConflictDto>> {
+    let repo = repo.inner().clone();
+    let operations = operations.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operations
+            .lock()
+            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+        Ok(repo
+            .list_conflicts()?
+            .into_iter()
+            .find(|c| c.game_id == game)
+            .map(|c| {
+                let version = |v: crate::domain::SaveVersion| SaveDto {
+                    id: c.id.clone(),
+                    game_id: game.to_string(),
+                    profile_id: c.profile_id.to_string(),
+                    created_at: v.modified_at,
+                    size_bytes: v.size_bytes,
+                };
+                SaveConflictDto {
+                    local: version(c.local),
+                    remote: version(c.remote),
+                    id: c.id,
+                    game_id: game.to_string(),
+                }
+            }))
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
 }
 
-/// POST /saves/{game}/conflict
 #[tauri::command]
 pub async fn resolve_save_conflict(
-    game: String,
+    app: tauri::AppHandle,
+    game: GameId,
     conflict_id: String,
     resolution: SaveConflictResolution,
+    repo: State<'_, Arc<crate::services::repo::RepoService>>,
+    processes: State<'_, Arc<ProcessService>>,
+    operations: State<'_, Arc<Mutex<()>>>,
 ) -> ApiResult<()> {
-    let _ = (game, conflict_id, resolution);
-    Err(ApiError::NotImplemented("resolve_save_conflict"))
+    let resolution = match resolution {
+        SaveConflictResolution::KeepLocal => crate::domain::ConflictResolution::KeepLocal,
+        SaveConflictResolution::KeepRemote => crate::domain::ConflictResolution::KeepRemote,
+        SaveConflictResolution::KeepBothLocalFirst => {
+            crate::domain::ConflictResolution::KeepBothLocalFirst
+        }
+        SaveConflictResolution::KeepBothRemoteFirst => {
+            crate::domain::ConflictResolution::KeepBothRemoteFirst
+        }
+    };
+    super::sync::resolve(
+        app,
+        Some(game),
+        conflict_id,
+        resolution,
+        repo.inner().clone(),
+        processes.inner().clone(),
+        operations.inner().clone(),
+    )
+    .await
 }
 
 #[derive(Debug, Serialize)]
@@ -101,22 +188,112 @@ pub enum SaveKind {
     Conflict,
     /// Текущее состояние перед откатом.
     BeforeRestore,
+    FileChanged,
 }
 
-/// Сохранения, новые сверху. `game_id = None` — по всем играм.
-/// TODO(backend): SaveService::list.
-#[tauri::command]
-pub fn list_save_history(game_id: Option<String>) -> ApiResult<Vec<SaveHistoryEntryDto>> {
-    let _ = game_id;
-    Err(ApiError::NotImplemented("list_save_history"))
+fn save_dto(save: crate::domain::Save) -> SaveDto {
+    SaveDto {
+        id: save.id,
+        game_id: save.game_id.to_string(),
+        profile_id: save.profile_id.to_string(),
+        created_at: save.created_at,
+        size_bytes: save.size_bytes,
+    }
 }
 
-/// Восстановить выбранное сохранение игры. Перед восстановлением создать сохранение `BeforeRestore`.
-/// TODO(backend): сценарий отката; если игра запущена — `ApiError::Rejected`. После — `SAVES_CHANGED`.
 #[tauri::command]
-pub async fn restore_save(save_id: String) -> ApiResult<()> {
-    let _ = save_id;
-    Err(ApiError::NotImplemented("restore_save"))
+pub async fn list_save_history(
+    game_id: Option<GameId>,
+    service: State<'_, Arc<SaveService>>,
+    catalog: State<'_, Arc<Catalog>>,
+    operations: State<'_, Arc<Mutex<()>>>,
+) -> ApiResult<Vec<SaveHistoryEntryDto>> {
+    let service = service.inner().clone();
+    let catalog = catalog.inner().clone();
+    let operations = operations.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operations
+            .lock()
+            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+        let games = catalog.games();
+        let profiles = catalog.profiles();
+        Ok(service
+            .list(game_id, None)?
+            .into_iter()
+            .map(|save| SaveHistoryEntryDto {
+                id: save.id,
+                game_id: save.game_id.to_string(),
+                game_name: games
+                    .get(&save.game_id)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_else(|| save.game_id.to_string()),
+                profile_name: profiles
+                    .get(&save.profile_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| save.profile_id.to_string()),
+                kind: match save.kind {
+                    crate::domain::SaveKind::BeforeSwitch => SaveKind::BeforeSwitch,
+                    crate::domain::SaveKind::AfterSession => SaveKind::AfterSession,
+                    crate::domain::SaveKind::Conflict => SaveKind::Conflict,
+                    crate::domain::SaveKind::BeforeRestore => SaveKind::BeforeRestore,
+                    crate::domain::SaveKind::FileChanged => SaveKind::FileChanged,
+                },
+                created_at: save.created_at,
+                size_bytes: save.size_bytes,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn restore_save(
+    app: tauri::AppHandle,
+    save_id: String,
+    service: State<'_, Arc<SaveService>>,
+    processes: State<'_, Arc<ProcessService>>,
+    operations: State<'_, Arc<Mutex<()>>>,
+) -> ApiResult<()> {
+    restore(
+        app,
+        None,
+        save_id,
+        service.inner().clone(),
+        processes.inner().clone(),
+        operations.inner().clone(),
+    )
+    .await
+}
+
+async fn restore(
+    app: tauri::AppHandle,
+    game: Option<GameId>,
+    id: String,
+    service: Arc<SaveService>,
+    processes: Arc<ProcessService>,
+    operations: Arc<Mutex<()>>,
+) -> ApiResult<()> {
+    let result = tauri::async_runtime::spawn_blocking(move || -> ApiResult<()> {
+        let _guard = operations
+            .lock()
+            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+        processes.refresh_running_games()?;
+        if game.is_some_and(|game| {
+            service
+                .get_save(&id)
+                .map(|s| s.game_id != game)
+                .unwrap_or(true)
+        }) {
+            return Err(ApiError::Rejected("Сохранение не принадлежит игре".into()));
+        }
+        service.apply_save(&id)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let _ = app.emit(super::events::SAVES_CHANGED, ());
+    result
 }
 
 #[cfg(test)]

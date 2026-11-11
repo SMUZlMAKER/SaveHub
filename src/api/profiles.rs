@@ -23,31 +23,77 @@ pub struct ProfileDto {
 
 /// GET /me
 #[tauri::command]
-pub fn current_profile(service: State<'_, Arc<ProfileService>>) -> ApiResult<ProfileDto> {
-    service
-        .active()?
-        .as_ref()
-        .map(|profile| to_dto(profile, true))
-        .ok_or_else(|| ApiError::Internal("Активный профиль не настроен".into()))
+pub async fn current_profile(
+    service: State<'_, Arc<ProfileService>>,
+    saves: State<'_, Arc<crate::services::save::SaveService>>,
+    operations: State<'_, Arc<std::sync::Mutex<()>>>,
+) -> ApiResult<ProfileDto> {
+    let service = service.inner().clone();
+    let saves = saves.inner().clone();
+    let operations = operations.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operations
+            .lock()
+            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+        let profile = service
+            .active()?
+            .ok_or_else(|| ApiError::Rejected("Активный профиль не настроен".into()))?;
+        let mut dto = to_dto(&profile, true);
+        dto.games_count = saves.games_count(&profile.id)?;
+        Ok(dto)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
 }
 
 #[tauri::command]
-pub fn list_profiles(service: State<'_, Arc<ProfileService>>) -> ApiResult<Vec<ProfileDto>> {
-    let active_id = service.active()?.map(|profile| profile.id);
-    Ok(service
-        .list()?
-        .into_iter()
-        .map(|profile| to_dto(&profile, active_id.as_ref() == Some(&profile.id)))
-        .collect())
+pub async fn list_profiles(
+    service: State<'_, Arc<ProfileService>>,
+    saves: State<'_, Arc<crate::services::save::SaveService>>,
+    operations: State<'_, Arc<std::sync::Mutex<()>>>,
+) -> ApiResult<Vec<ProfileDto>> {
+    let service = service.inner().clone();
+    let saves = saves.inner().clone();
+    let operations = operations.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operations
+            .lock()
+            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+        let active_id = service.active()?.map(|p| p.id);
+        service
+            .list()?
+            .into_iter()
+            .map(|profile| {
+                let mut dto = to_dto(&profile, active_id == Some(profile.id));
+                dto.games_count = saves.games_count(&profile.id)?;
+                Ok(dto)
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
 }
 
 /// Переключить сохранения всех игр на профиль. Операция долгая, поэтому `async` — не блокирует окно.
 /// После успеха — событие `events::PROFILE_CHANGED` и обновить меню трея.
-// TODO(работа с git): workflows::SwitchProfile. Если запущена игра — `ApiError::Rejected`.
 #[tauri::command]
-pub async fn switch_profile(profile_id: ProfileId) -> ApiResult<()> {
-    let _ = profile_id;
-    Err(ApiError::NotImplemented("switch_profile"))
+pub async fn switch_profile(
+    app: tauri::AppHandle,
+    profile_id: ProfileId,
+    workflow: State<'_, Arc<crate::workflows::SwitchProfile>>,
+) -> ApiResult<()> {
+    let workflow = workflow.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || workflow.execute(&profile_id))
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    for event in [
+        PROFILE_CHANGED,
+        crate::api::events::SAVES_CHANGED,
+        crate::api::events::CONFLICTS_CHANGED,
+    ] {
+        let _ = app.emit(event, ());
+    }
+    result.map_err(Into::into)
 }
 
 #[tauri::command]

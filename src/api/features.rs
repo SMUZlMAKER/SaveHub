@@ -17,27 +17,10 @@ pub struct AppFeatures {
 pub fn get_app_features() -> AppFeatures {
     AppFeatures {
         sync: false,
-        profile_switch: false,
-        save_history: false,
-        conflicts: false,
+        profile_switch: true,
+        save_history: true,
+        conflicts: true,
         persistent_games: true,
-        persistent_profiles: false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::api::{ApiError, saves, sync};
-
-    #[test]
-    fn unavailable_read_operations_do_not_report_demo_success() {
-        assert!(matches!(
-            sync::list_conflicts(),
-            Err(ApiError::NotImplemented(_))
-        ));
-        assert!(matches!(
-            saves::list_save_history(None),
-            Err(ApiError::NotImplemented(_))
-        ));
+        persistent_profiles: true,
     }
 }

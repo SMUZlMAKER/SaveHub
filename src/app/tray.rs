@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::api::events::NAVIGATE;
 use tauri::{
-    AppHandle, Emitter, Manager, Wry,
+    AppHandle, Emitter, Listener, Manager, Wry,
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -28,32 +28,54 @@ const STATUS_REFRESH: Duration = Duration::from_secs(30);
 
 /// Всё, что нужно меню, чтобы себя нарисовать.
 pub struct TrayView {
-    pub profiles: Vec<String>,
-    pub active_profile: Option<String>,
+    pub profiles: Vec<(crate::domain::ProfileId, String)>,
+    pub active_profile: Option<crate::domain::ProfileId>,
     /// Игра, которая сейчас запущена: пока она идет, профили переключать нельзя.
     pub running_game: Option<String>,
 }
 
 impl TrayView {
-    // TODO: убрать заглушку, когда появятся ProfileService и RuntimeState — брать данные из хранилищ.
-    fn placeholder() -> Self {
+    fn load(app: &AppHandle) -> Self {
+        let catalog = app.state::<std::sync::Arc<crate::domain::Catalog>>();
+        let runtime = app.state::<std::sync::Arc<crate::domain::RuntimeState>>();
+        let mut profiles: Vec<_> = catalog
+            .profiles()
+            .into_values()
+            .map(|p| (p.id, p.name))
+            .collect();
+        profiles.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        let running_game = match runtime.running_games() {
+            None => Some("состояние процессов неизвестно".into()),
+            Some(games) if !games.is_empty() => Some(
+                games
+                    .iter()
+                    .map(|id| {
+                        catalog
+                            .games()
+                            .get(id)
+                            .map(|g| g.name.clone())
+                            .unwrap_or_else(|| id.to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            _ => None,
+        };
         Self {
-            profiles: Vec::new(),
-            active_profile: None,
-            running_game: None,
+            profiles,
+            active_profile: runtime.active_profile(),
+            running_game,
         }
     }
 }
 
 struct TrayState {
-    view: Mutex<TrayView>,
     /// Строка статуса синхронизации: ее текст обновляем по таймеру, не пересобирая меню.
     status_item: Mutex<Option<MenuItem<Wry>>>,
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     app.manage(TrayState {
-        view: Mutex::new(TrayView::placeholder()),
         status_item: Mutex::new(None),
     });
 
@@ -78,6 +100,15 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     }
     tray.build(app)?;
 
+    for event in [
+        crate::api::events::PROFILE_CHANGED,
+        crate::api::events::GAMES_CHANGED,
+    ] {
+        let handle = app.clone();
+        app.listen(event, move |_| {
+            refresh_menu(&handle);
+        });
+    }
     spawn_status_refresher(app.clone());
     Ok(())
 }
@@ -92,19 +123,26 @@ pub fn show_main_window(app: &AppHandle) {
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let state = app.state::<TrayState>();
-    let view = state.view.lock().unwrap();
+    let view = TrayView::load(app);
     let menu = Menu::new(app)?;
 
     let header = match &view.active_profile {
-        Some(profile) => format!("Активный профиль: {profile}"),
+        Some(profile) => format!(
+            "Активный профиль: {}",
+            view.profiles
+                .iter()
+                .find(|(id, _)| id == profile)
+                .map(|(_, name)| name.as_str())
+                .unwrap_or("не найден")
+        ),
         None => "Профили — в окне приложения".to_owned(),
     };
     menu.append(&MenuItem::new(app, header, false, None::<&str>)?)?;
 
     let can_switch = view.running_game.is_none();
-    for profile in &view.profiles {
-        let is_active = view.active_profile.as_deref() == Some(profile.as_str());
-        let id = format!("{PROFILE_PREFIX}{profile}");
+    for (profile_id, profile) in &view.profiles {
+        let is_active = view.active_profile == Some(*profile_id);
+        let id = format!("{PROFILE_PREFIX}{profile_id}");
         menu.append(&CheckMenuItem::with_id(
             app,
             id,
@@ -172,9 +210,43 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     }
 }
 
-fn switch_profile(app: &AppHandle, _profile: &str) {
-    // Until the real workflow is connected, never simulate a successful switch.
-    open_screen(app, "profiles");
+fn switch_profile(app: &AppHandle, profile: &str) {
+    let Ok(profile) = profile.parse() else {
+        return;
+    };
+    let workflow = app
+        .state::<std::sync::Arc<crate::workflows::SwitchProfile>>()
+        .inner()
+        .clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = workflow.execute(&profile);
+        for event in [
+            crate::api::events::PROFILE_CHANGED,
+            crate::api::events::SAVES_CHANGED,
+            crate::api::events::CONFLICTS_CHANGED,
+        ] {
+            let _ = app.emit(event, ());
+        }
+        if let Err(error) = result {
+            use tauri_plugin_dialog::DialogExt;
+            let error = crate::api::ApiError::from(error);
+            let message = match error {
+                crate::api::ApiError::Rejected(m) | crate::api::ApiError::Internal(m) => m,
+                _ => "Переключение недоступно".into(),
+            };
+            app.dialog().message(message).title("SaveHub").show(|_| {});
+        }
+    });
+}
+
+fn refresh_menu(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let (Some(tray), Ok(menu)) = (handle.tray_by_id(TRAY_ID), build_menu(&handle)) {
+            let _ = tray.set_menu(Some(menu));
+        }
+    });
 }
 
 fn sync_now(app: &AppHandle) {

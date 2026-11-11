@@ -19,6 +19,7 @@ pub struct GameService {
     storage: Option<config::DataDirectory>,
     token_for_url: fn(&str) -> ServiceResult<String>,
     operation: Mutex<()>,
+    save_operations: Arc<Mutex<()>>,
     sync_status: Mutex<SyncStatus>,
     revision: AtomicU64,
 }
@@ -33,6 +34,7 @@ impl GameService {
             storage: None,
             token_for_url: Self::catalog_token,
             operation: Mutex::new(()),
+            save_operations: Arc::new(Mutex::new(())),
             revision: AtomicU64::new(0),
             sync_status: Mutex::new(SyncStatus {
                 state: SyncState::NotConfigured,
@@ -40,6 +42,12 @@ impl GameService {
                 error: None,
             }),
         }
+    }
+
+    /// Serialize catalogue/path mutations with save binding and profile switching.
+    pub fn with_save_operations(mut self, operations: Arc<Mutex<()>>) -> Self {
+        self.save_operations = operations;
+        self
     }
 
     pub fn persistent(
@@ -237,6 +245,10 @@ impl GameService {
     }
 
     pub fn reload_catalog(&self) -> ServiceResult<()> {
+        let _save_operation = self
+            .save_operations
+            .lock()
+            .map_err(|_| ServiceError::Conflict("Блокировка сохранений повреждена".into()))?;
         let _operation = self
             .operation
             .lock()
@@ -288,6 +300,10 @@ impl GameService {
     }
 
     pub fn sync_catalog(&self) -> ServiceResult<()> {
+        let _save_operation = self
+            .save_operations
+            .lock()
+            .map_err(|_| ServiceError::Conflict("Блокировка сохранений повреждена".into()))?;
         let _operation = self
             .operation
             .lock()
@@ -372,6 +388,10 @@ impl GameService {
         refresh_shared: bool,
         change: impl FnOnce(&mut HashMap<GameId, Game>, &mut LocalConfig) -> ServiceResult<()>,
     ) -> ServiceResult<()> {
+        let _save_operation = self
+            .save_operations
+            .lock()
+            .map_err(|_| ServiceError::Conflict("Блокировка сохранений повреждена".into()))?;
         let _operation = self
             .operation
             .lock()

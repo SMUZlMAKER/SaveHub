@@ -13,7 +13,46 @@ pub fn spawn(app: tauri::AppHandle) {
         let processes = app.state::<Arc<ProcessService>>().inner().clone();
         let mut failed = false;
         loop {
-            match processes.refresh_running_games() {
+            let update = {
+                let operations = app.state::<Arc<std::sync::Mutex<()>>>();
+                let _guard = operations
+                    .lock()
+                    .expect("Repository operations lock poisoned");
+                let result = processes.refresh_running_games();
+                if let Ok(changes) = &result {
+                    let settings = app.state::<Arc<crate::domain::Settings>>();
+                    let runtime = app.state::<Arc<crate::domain::RuntimeState>>();
+                    if settings.data().local_repo_path.is_some() {
+                        if let Some(profile) = runtime.active_profile() {
+                            let saves = app.state::<Arc<crate::services::save::SaveService>>();
+                            for event in changes {
+                                if let GameProcessEvent::Stopped(game) = event {
+                                    let snapshot = (|| -> crate::services::ServiceResult<()> {
+                                        if saves.is_bound(*game, &profile)? {
+                                            saves.create_save(
+                                                *game,
+                                                &profile.to_string(),
+                                                crate::domain::SaveKind::AfterSession,
+                                            )?;
+                                        }
+                                        Ok(())
+                                    })();
+                                    if let Err(error) = snapshot {
+                                        let mut status = runtime.sync_status();
+                                        status.state = crate::domain::SyncState::Error;
+                                        status.error = Some(format!(
+                                            "Не удалось сохранить завершённую сессию: {error:?}"
+                                        ));
+                                        runtime.set_sync_status(status);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                result
+            };
+            match update {
                 Ok(changes) => {
                     if failed {
                         let _ = app.emit(events::GAMES_CHANGED, ());
@@ -46,6 +85,17 @@ pub fn spawn(app: tauri::AppHandle) {
                             .is_some_and(|ids| !ids.contains(&id))
                         {
                             launches.mark_stopped(&app, id);
+                        }
+                    }
+                    if changes
+                        .iter()
+                        .any(|event| matches!(event, GameProcessEvent::Stopped(_)))
+                    {
+                        let _ = app.emit(events::SAVES_CHANGED, ());
+                        if let Some(worker) =
+                            app.try_state::<crate::background::repo::RepoWorkerHandle>()
+                        {
+                            let _ = worker.wake();
                         }
                     }
                     for event in changes {

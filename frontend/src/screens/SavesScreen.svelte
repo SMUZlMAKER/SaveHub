@@ -14,6 +14,7 @@
     afterSession: 'После игровой сессии',
     conflict: 'Вторая версия при конфликте',
     beforeRestore: 'Перед откатом',
+    fileChanged: 'Изменение файлов',
   }
 
   let games = $state<Game[]>([])
