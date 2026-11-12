@@ -227,7 +227,11 @@ where
 
 impl RepoService {
     /// Создать отдельную пустую историю профиля и вернуть свободное имя ветки.
-    pub fn create_profile_branch(&self, name: &str) -> ServiceResult<String> {
+    pub fn create_profile_branch(
+        &self,
+        name: &str,
+        profile_id: ProfileId,
+    ) -> ServiceResult<String> {
         let _guard = self.lock()?;
         if name.trim().is_empty() {
             return Err(ServiceError::InvalidInput(
@@ -247,6 +251,20 @@ impl RepoService {
         branches.extend(git::head_branch(&root).map_err(ServiceError::Adapter)?);
         branches.extend(git::list_remote_branches(&root, "origin").map_err(ServiceError::Adapter)?);
         branches.extend(profiles.values().map(|profile| profile.branch.clone()));
+        branches.extend(
+            self.local_profile_deletion_records()?
+                .into_iter()
+                .filter_map(|deletion| deletion.branch),
+        );
+        if let Some(directory) = &self.persistence {
+            branches.extend(
+                config::read_profile_deletions(&directory.join(PROFILE_DELETIONS_FILE))
+                    .map_err(ServiceError::Adapter)?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|deletion| deletion.branch),
+            );
+        }
         // A ref foo/bar also reserves foo: Git cannot store both namespaces.
         let occupied: Vec<_> = branches
             .iter()
@@ -254,7 +272,9 @@ impl RepoService {
             .collect();
         let base = crate::utils::utils::name_to_branch(name);
         let base = if base.is_empty() { "profile" } else { &base };
-        let branch = unique_branch(base, occupied);
+        let base: String = base.chars().take(200).collect();
+        let candidate = format!("{base}-{}", profile_id.simple());
+        let branch = unique_branch(&candidate, occupied);
         // An independent root commit never inherits another profile's saves.
         let commit = git::commit_files(&root, None, &[], "Initialize independent save history")
             .map_err(ServiceError::Adapter)?;
@@ -678,7 +698,24 @@ impl RepoService {
             &[&local_deletion_records, &disk_deletion_records],
             &known_profiles,
         )?;
+        let live_profile_branches: std::collections::HashSet<String> = profiles
+            .iter()
+            .map(|profile| profile.branch.clone())
+            .collect();
+        let protected_deletion_branches: std::collections::HashSet<String> = deletions
+            .iter()
+            .filter_map(|deletion| deletion.branch.as_ref())
+            .filter(|branch| live_profile_branches.contains(*branch))
+            .cloned()
+            .collect();
         for deletion in &deletions {
+            if deletion
+                .branch
+                .as_deref()
+                .is_some_and(|branch| protected_deletion_branches.contains(branch))
+            {
+                continue;
+            }
             if let Some(profile) =
                 self.catalog
                     .profiles()
@@ -727,6 +764,9 @@ impl RepoService {
                     deletion.id
                 ))
             })?;
+            if protected_deletion_branches.contains(branch) {
+                continue;
+            }
             git::delete_remote_branch(root, "origin", branch, token)
                 .map_err(ServiceError::Adapter)?;
             git::delete_remote_tracking_branch(root, branch).map_err(ServiceError::Adapter)?;
@@ -1893,6 +1933,163 @@ mod tests {
             .sync_catalog_at(&fixture.root, "")
             .unwrap();
         assert!(!catalog.profiles().contains_key(&fixture.profile.id));
+    }
+
+    #[test]
+    fn stale_deletion_marker_cannot_remove_a_branch_reused_by_a_live_profile() {
+        let fixture = Fixture::new();
+        fixture.service.runtime.set_running_games(Vec::new());
+
+        let previous_save = git::commit_files(
+            &fixture.root,
+            None,
+            &[("save.dat", b"previous save")],
+            "Previous profile save",
+        )
+        .unwrap();
+        git::create_branch(&fixture.root, &fixture.profile.branch, &previous_save).unwrap();
+        git::push(
+            &fixture.root,
+            "origin",
+            &format!(
+                "refs/heads/{}:refs/heads/{}",
+                fixture.profile.branch, fixture.profile.branch
+            ),
+            "",
+        )
+        .unwrap();
+        fixture.service.sync_catalog_at(&fixture.root, "").unwrap();
+
+        let catalog_head = git::remote_head(&fixture.root, CATALOG_BRANCH)
+            .unwrap()
+            .unwrap();
+        let empty_profiles = serde_json::to_vec(&Vec::<Profile>::new()).unwrap();
+        let old_deletion = serde_json::to_vec(&[ProfileDeletion {
+            id: fixture.profile.id,
+            branch: Some(fixture.profile.branch.clone()),
+        }])
+        .unwrap();
+        let deleted_catalog = git::commit_files(
+            &fixture.root,
+            Some(&catalog_head),
+            &[
+                ("profiles.json", &empty_profiles),
+                (PROFILE_DELETIONS_FILE, &old_deletion),
+            ],
+            "Delete previous profile",
+        )
+        .unwrap();
+        git::push(
+            &fixture.root,
+            "origin",
+            &format!("{deleted_catalog}:refs/heads/{CATALOG_BRANCH}"),
+            "",
+        )
+        .unwrap();
+        fixture.service.sync_catalog_at(&fixture.root, "").unwrap();
+        assert!(
+            git::remote_head(&fixture.root, &fixture.profile.branch)
+                .unwrap()
+                .is_none()
+        );
+
+        let replacement = Profile {
+            id: uuid::Uuid::new_v4(),
+            name: "Replay".into(),
+            branch: fixture.profile.branch.clone(),
+            last_played_game: None,
+        };
+        let current_save = git::commit_files(
+            &fixture.root,
+            None,
+            &[("save.dat", b"new remote save")],
+            "New profile save",
+        )
+        .unwrap();
+        git::create_branch(&fixture.root, &replacement.branch, &current_save).unwrap();
+        git::push(
+            &fixture.root,
+            "origin",
+            &format!(
+                "refs/heads/{}:refs/heads/{}",
+                replacement.branch, replacement.branch
+            ),
+            "",
+        )
+        .unwrap();
+        fixture
+            .service
+            .catalog
+            .replace_profiles(vec![replacement.clone()]);
+        fixture
+            .service
+            .runtime
+            .set_active_profile(Some(replacement.id))
+            .unwrap();
+        let base = git::remote_head(&fixture.root, CATALOG_BRANCH)
+            .unwrap()
+            .unwrap();
+        let profiles = serde_json::to_vec(std::slice::from_ref(&replacement)).unwrap();
+        let catalog_commit = git::commit_files(
+            &fixture.root,
+            Some(&base),
+            &[("profiles.json", &profiles)],
+            "Create replacement profile",
+        )
+        .unwrap();
+        git::push(
+            &fixture.root,
+            "origin",
+            &format!("{catalog_commit}:refs/heads/{CATALOG_BRANCH}"),
+            "",
+        )
+        .unwrap();
+        let catalog_tree = git::prepare_worktree(&fixture.root, CATALOG_BRANCH, "catalog").unwrap();
+        let catalog_repository = git2::Repository::open(&catalog_tree).unwrap();
+        catalog_repository
+            .find_reference(&format!("refs/heads/{CATALOG_BRANCH}"))
+            .unwrap()
+            .set_target(
+                git2::Oid::from_str(&catalog_commit).unwrap(),
+                "Simulate the catalog already fetched on this computer",
+            )
+            .unwrap();
+        catalog_repository
+            .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
+
+        fixture.service.sync_catalog_at(&fixture.root, "").unwrap();
+
+        assert_eq!(
+            fixture.service.catalog.profiles()[&replacement.id].branch,
+            fixture.profile.branch
+        );
+        assert_eq!(
+            git::remote_head(&fixture.root, &fixture.profile.branch)
+                .unwrap()
+                .as_deref(),
+            Some(current_save.as_str())
+        );
+        assert!(
+            fixture
+                .service
+                .apply_profile_updates(&replacement.id.to_string())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fs::read(
+                &git::prepare_worktree(
+                    &fixture.root,
+                    &fixture.profile.branch,
+                    &replacement.id.to_string()
+                )
+                .unwrap()
+                .join("save.dat")
+            )
+            .unwrap(),
+            b"new remote save"
+        );
     }
 
     #[test]
