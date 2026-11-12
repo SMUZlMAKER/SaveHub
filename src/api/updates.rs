@@ -42,8 +42,12 @@ pub struct AppPreferences {
 pub async fn get_app_preferences(
     app: tauri::AppHandle,
     state: tauri::State<'_, Updates>,
+    trace_id: Option<String>,
 ) -> ApiResult<AppPreferences> {
-    state.preferences(&app)
+    crate::adapters::diagnostics::request(trace_id, "get_app_preferences", async move {
+        state.preferences(&app)
+    })
+    .await
 }
 #[tauri::command]
 pub async fn save_app_preferences(
@@ -51,24 +55,39 @@ pub async fn save_app_preferences(
     state: tauri::State<'_, Updates>,
     preferences: Preferences,
     launch_at_login: bool,
+    trace_id: Option<String>,
 ) -> ApiResult<()> {
-    state.save(&app, preferences, launch_at_login)
+    crate::adapters::diagnostics::request(trace_id, "save_app_preferences", async move {
+        state.save(&app, preferences, launch_at_login)
+    })
+    .await
 }
 #[tauri::command]
-pub fn get_update_status(state: tauri::State<'_, Updates>) -> UpdateStatus {
-    state.status()
+pub fn get_update_status(
+    state: tauri::State<'_, Updates>,
+    trace_id: Option<String>,
+) -> UpdateStatus {
+    crate::adapters::diagnostics::request_sync(trace_id, "get_update_status", || state.status())
 }
 #[tauri::command]
 pub async fn check_for_updates(
     app: tauri::AppHandle,
     state: tauri::State<'_, Updates>,
+    trace_id: Option<String>,
 ) -> ApiResult<UpdateStatus> {
-    state.check(&app).await
+    crate::adapters::diagnostics::request(trace_id, "check_for_updates", async move {
+        state.check(&app).await
+    })
+    .await
 }
 #[tauri::command]
 pub async fn install_update(
     app: tauri::AppHandle,
     state: tauri::State<'_, Updates>,
+    trace_id: Option<String>,
 ) -> ApiResult<()> {
-    state.install(&app).await
+    crate::adapters::diagnostics::request(trace_id, "install_update", async move {
+        state.install(&app).await
+    })
+    .await
 }

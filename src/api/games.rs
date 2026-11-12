@@ -59,19 +59,23 @@ pub async fn list_games(
     service: State<'_, Arc<GameService>>,
     settings: State<'_, Arc<Settings>>,
     runtime: State<'_, Arc<RuntimeState>>,
+    trace_id: Option<String>,
 ) -> ApiResult<Vec<GameDto>> {
-    let (service, settings, runtime) = (
-        service.inner().clone(),
-        settings.inner().clone(),
-        runtime.inner().clone(),
-    );
-    blocking(move || {
-        let mut games = service.list()?;
-        games.sort_by_key(|g| (g.name.to_lowercase(), g.id));
-        Ok(games
-            .iter()
-            .map(|g| to_dto(g, &settings, &runtime))
-            .collect())
+    crate::adapters::diagnostics::request(trace_id, "list_games", async move {
+        let (service, settings, runtime) = (
+            service.inner().clone(),
+            settings.inner().clone(),
+            runtime.inner().clone(),
+        );
+        blocking(move || {
+            let mut games = service.list()?;
+            games.sort_by_key(|g| (g.name.to_lowercase(), g.id));
+            Ok(games
+                .iter()
+                .map(|g| to_dto(g, &settings, &runtime))
+                .collect())
+        })
+        .await
     })
     .await
 }
@@ -81,26 +85,34 @@ pub async fn get_game_status(
     service: State<'_, Arc<GameService>>,
     settings: State<'_, Arc<Settings>>,
     runtime: State<'_, Arc<RuntimeState>>,
+    trace_id: Option<String>,
 ) -> ApiResult<GameStatus> {
-    let (service, settings, runtime) = (
-        service.inner().clone(),
-        settings.inner().clone(),
-        runtime.inner().clone(),
-    );
-    blocking(move || Ok(to_dto(&service.get(game_id)?, &settings, &runtime).status)).await
+    crate::adapters::diagnostics::request(trace_id, "get_game_status", async move {
+        let (service, settings, runtime) = (
+            service.inner().clone(),
+            settings.inner().clone(),
+            runtime.inner().clone(),
+        );
+        blocking(move || Ok(to_dto(&service.get(game_id)?, &settings, &runtime).status)).await
+    })
+    .await
 }
 #[tauri::command]
 pub async fn validate_game_paths(
     exe_path: String,
     save_path: String,
+    trace_id: Option<String>,
 ) -> ApiResult<PathValidationDto> {
-    blocking(move || {
-        let (exe_path, save_path) =
-            crate::adapters::game_paths::validate(&paths(exe_path, save_path));
-        Ok(PathValidationDto {
-            exe_path,
-            save_path,
+    crate::adapters::diagnostics::request(trace_id, "validate_game_paths", async move {
+        blocking(move || {
+            let (exe_path, save_path) =
+                crate::adapters::game_paths::validate(&paths(exe_path, save_path));
+            Ok(PathValidationDto {
+                exe_path,
+                save_path,
+            })
         })
+        .await
     })
     .await
 }
@@ -114,25 +126,29 @@ pub async fn add_game(
     service: State<'_, Arc<GameService>>,
     settings: State<'_, Arc<Settings>>,
     runtime: State<'_, Arc<RuntimeState>>,
+    trace_id: Option<String>,
 ) -> ApiResult<GameDto> {
-    let (service, settings, runtime) = (
-        service.inner().clone(),
-        settings.inner().clone(),
-        runtime.inner().clone(),
-    );
-    let previous_revision = service.revision();
-    let previous_status = service.status();
-    let observer = service.clone();
-    let result = blocking(move || {
-        let game = service.add_with_paths(&name, paths(exe_path, save_path))?;
-        Ok(to_dto(&game, &settings, &runtime))
+    crate::adapters::diagnostics::request(trace_id, "add_game", async move {
+        let (service, settings, runtime) = (
+            service.inner().clone(),
+            settings.inner().clone(),
+            runtime.inner().clone(),
+        );
+        let previous_revision = service.revision();
+        let previous_status = service.status();
+        let observer = service.clone();
+        let result = blocking(move || {
+            let game = service.add_with_paths(&name, paths(exe_path, save_path))?;
+            Ok(to_dto(&game, &settings, &runtime))
+        })
+        .await;
+        crate::app::catalog::notify_changes(&app, &observer, previous_revision);
+        if observer.status() != previous_status {
+            worker.reschedule();
+        }
+        result
     })
-    .await;
-    crate::app::catalog::notify_changes(&app, &observer, previous_revision);
-    if observer.status() != previous_status {
-        worker.reschedule();
-    }
-    result
+    .await
 }
 #[tauri::command]
 pub async fn update_game(
@@ -145,25 +161,29 @@ pub async fn update_game(
     service: State<'_, Arc<GameService>>,
     settings: State<'_, Arc<Settings>>,
     runtime: State<'_, Arc<RuntimeState>>,
+    trace_id: Option<String>,
 ) -> ApiResult<GameDto> {
-    let (service, settings, runtime) = (
-        service.inner().clone(),
-        settings.inner().clone(),
-        runtime.inner().clone(),
-    );
-    let previous_revision = service.revision();
-    let previous_status = service.status();
-    let observer = service.clone();
-    let result = blocking(move || {
-        let game = service.update_with_paths(game_id, &name, paths(exe_path, save_path))?;
-        Ok(to_dto(&game, &settings, &runtime))
+    crate::adapters::diagnostics::request(trace_id, "update_game", async move {
+        let (service, settings, runtime) = (
+            service.inner().clone(),
+            settings.inner().clone(),
+            runtime.inner().clone(),
+        );
+        let previous_revision = service.revision();
+        let previous_status = service.status();
+        let observer = service.clone();
+        let result = blocking(move || {
+            let game = service.update_with_paths(game_id, &name, paths(exe_path, save_path))?;
+            Ok(to_dto(&game, &settings, &runtime))
+        })
+        .await;
+        crate::app::catalog::notify_changes(&app, &observer, previous_revision);
+        if observer.status() != previous_status {
+            worker.reschedule();
+        }
+        result
     })
-    .await;
-    crate::app::catalog::notify_changes(&app, &observer, previous_revision);
-    if observer.status() != previous_status {
-        worker.reschedule();
-    }
-    result
+    .await
 }
 #[tauri::command]
 pub async fn resolve_game_paths(
@@ -176,51 +196,58 @@ pub async fn resolve_game_paths(
     service: State<'_, Arc<GameService>>,
     settings: State<'_, Arc<Settings>>,
     runtime: State<'_, Arc<RuntimeState>>,
+    trace_id: Option<String>,
 ) -> ApiResult<GameDto> {
-    let (service, settings, runtime) = (
-        service.inner().clone(),
-        settings.inner().clone(),
-        runtime.inner().clone(),
-    );
-    let previous_revision = service.revision();
-    let previous_status = service.status();
-    let observer = service.clone();
-    let result = blocking(move || {
-        let game = match action {
-            PathAction::UpdateRepository => service.update_shared_paths(
-                game_id,
-                paths(exe_path.unwrap_or_default(), save_path.unwrap_or_default()),
-            )?,
-            PathAction::Ignore => service.ignore_on_this_pc(game_id)?,
-            PathAction::UseLocal => service.use_local_paths(
-                game_id,
-                paths(exe_path.unwrap_or_default(), save_path.unwrap_or_default()),
-            )?,
-        };
-        Ok(to_dto(&game, &settings, &runtime))
+    crate::adapters::diagnostics::request(trace_id, "resolve_game_paths", async move {
+        let (service, settings, runtime) = (
+            service.inner().clone(),
+            settings.inner().clone(),
+            runtime.inner().clone(),
+        );
+        let previous_revision = service.revision();
+        let previous_status = service.status();
+        let observer = service.clone();
+        let result = blocking(move || {
+            let game = match action {
+                PathAction::UpdateRepository => service.update_shared_paths(
+                    game_id,
+                    paths(exe_path.unwrap_or_default(), save_path.unwrap_or_default()),
+                )?,
+                PathAction::Ignore => service.ignore_on_this_pc(game_id)?,
+                PathAction::UseLocal => service.use_local_paths(
+                    game_id,
+                    paths(exe_path.unwrap_or_default(), save_path.unwrap_or_default()),
+                )?,
+            };
+            Ok(to_dto(&game, &settings, &runtime))
+        })
+        .await;
+        crate::app::catalog::notify_changes(&app, &observer, previous_revision);
+        if observer.status() != previous_status {
+            worker.reschedule();
+        }
+        result
     })
-    .await;
-    crate::app::catalog::notify_changes(&app, &observer, previous_revision);
-    if observer.status() != previous_status {
-        worker.reschedule();
-    }
-    result
+    .await
 }
 
 #[tauri::command]
 pub fn get_catalog_status(
     service: State<'_, Arc<GameService>>,
+    trace_id: Option<String>,
 ) -> ApiResult<super::sync::SyncStatusDto> {
-    let status = service.status();
-    Ok(super::sync::SyncStatusDto {
-        state: match status.state {
-            crate::domain::SyncState::NotConfigured => super::sync::SyncState::NotConfigured,
-            crate::domain::SyncState::Idle => super::sync::SyncState::Idle,
-            crate::domain::SyncState::Syncing => super::sync::SyncState::Syncing,
-            crate::domain::SyncState::Error => super::sync::SyncState::Error,
-        },
-        last_sync_at: status.last_sync_at,
-        error: status.error,
+    crate::adapters::diagnostics::request_sync(trace_id, "get_catalog_status", || {
+        let status = service.status();
+        Ok(super::sync::SyncStatusDto {
+            state: match status.state {
+                crate::domain::SyncState::NotConfigured => super::sync::SyncState::NotConfigured,
+                crate::domain::SyncState::Idle => super::sync::SyncState::Idle,
+                crate::domain::SyncState::Syncing => super::sync::SyncState::Syncing,
+                crate::domain::SyncState::Error => super::sync::SyncState::Error,
+            },
+            last_sync_at: status.last_sync_at,
+            error: status.error,
+        })
     })
 }
 
@@ -229,19 +256,23 @@ pub async fn sync_catalog(
     app: tauri::AppHandle,
     worker: State<'_, CatalogWorker>,
     service: State<'_, Arc<GameService>>,
+    trace_id: Option<String>,
 ) -> ApiResult<()> {
-    let service = service.inner().clone();
-    service.mark_sync_pending();
-    crate::app::catalog::notify_status(&app);
-    let previous_revision = service.revision();
-    let previous_status = service.status();
-    let observer = service.clone();
-    let result = blocking(move || service.sync_catalog().map_err(Into::into)).await;
-    crate::app::catalog::notify_changes(&app, &observer, previous_revision);
-    if observer.status() != previous_status {
-        worker.reschedule();
-    }
-    result
+    crate::adapters::diagnostics::request(trace_id, "sync_catalog", async move {
+        let service = service.inner().clone();
+        service.mark_sync_pending();
+        crate::app::catalog::notify_status(&app);
+        let previous_revision = service.revision();
+        let previous_status = service.status();
+        let observer = service.clone();
+        let result = blocking(move || service.sync_catalog().map_err(Into::into)).await;
+        crate::app::catalog::notify_changes(&app, &observer, previous_revision);
+        if observer.status() != previous_status {
+            worker.reschedule();
+        }
+        result
+    })
+    .await
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -250,25 +281,31 @@ pub struct SaveSuggestionDto {
     pub save_dirs: Vec<String>,
 }
 #[tauri::command]
-pub async fn suggest_save_dirs(exe_path: String) -> ApiResult<Option<SaveSuggestionDto>> {
-    blocking(move || {
-        static DB: OnceLock<crate::adapters::save_paths::SaveDb> = OnceLock::new();
-        let db = DB.get_or_init(crate::adapters::save_paths::SaveDb::bundled);
-        Ok(db.suggest(Path::new(&exe_path)).map(|s| SaveSuggestionDto {
-            game: s.game,
-            save_dirs: s
-                .save_dirs
-                .into_iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect(),
-        }))
+pub async fn suggest_save_dirs(
+    exe_path: String,
+    trace_id: Option<String>,
+) -> ApiResult<Option<SaveSuggestionDto>> {
+    crate::adapters::diagnostics::request(trace_id, "suggest_save_dirs", async move {
+        blocking(move || {
+            static DB: OnceLock<crate::adapters::save_paths::SaveDb> = OnceLock::new();
+            let db = DB.get_or_init(crate::adapters::save_paths::SaveDb::bundled);
+            Ok(db.suggest(Path::new(&exe_path)).map(|s| SaveSuggestionDto {
+                game: s.game,
+                save_dirs: s
+                    .save_dirs
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+            }))
+        })
+        .await
     })
     .await
 }
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> ApiResult<T> + Send + 'static,
 ) -> ApiResult<T> {
-    tauri::async_runtime::spawn_blocking(f)
+    crate::app::diagnostics::spawn_blocking(f)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
 }

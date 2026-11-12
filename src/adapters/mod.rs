@@ -24,3 +24,5 @@ pub mod game_paths;
 pub mod app_identity;
 
 pub mod hotkey;
+
+pub mod diagnostics;

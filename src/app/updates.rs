@@ -23,6 +23,7 @@ pub struct Updates {
     operation: tokio::sync::Mutex<()>,
 }
 fn internal(e: impl std::fmt::Display) -> ApiError {
+    crate::adapters::diagnostics::event("updater_error", "internal");
     ApiError::Internal(e.to_string())
 }
 impl Updates {
@@ -86,6 +87,7 @@ impl Updates {
         Ok(())
     }
     pub async fn check(&self, app: &tauri::AppHandle) -> ApiResult<UpdateStatus> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("updater.check");
         let _operation = self.operation.try_lock().map_err(|_| {
             ApiError::Rejected("Обновление уже проверяется или устанавливается".into())
         })?;
@@ -145,6 +147,7 @@ impl Updates {
         Ok(self.status())
     }
     pub async fn install(&self, app: &tauri::AppHandle) -> ApiResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("updater.install");
         let _operation = self.operation.try_lock().map_err(|_| {
             ApiError::Rejected("Обновление уже проверяется или устанавливается".into())
         })?;
@@ -170,7 +173,7 @@ impl Updates {
                 .state::<crate::background::repo::RepoWorkerHandle>()
                 .inner()
                 .clone();
-            tauri::async_runtime::spawn_blocking(move || {
+            crate::app::diagnostics::spawn_blocking(move || {
                 let _pause = worker.pause_after_flush().map_err(ApiError::from)?;
                 update.install(bytes).map_err(internal)
             })

@@ -117,15 +117,15 @@
     <h1>SaveHub</h1>
     <span class="muted sync-state" class:error={sync?.state === 'error'}>{syncText}</span>
   </div>
-  <button onclick={syncNow} disabled={!features?.sync || !sync || sync.state === 'notConfigured' || syncing || sync.state === 'syncing'}>Синхронизировать</button>
+  <button data-diagnostic="sync_now" onclick={syncNow} disabled={!features?.sync || !sync || sync.state === 'notConfigured' || syncing || sync.state === 'syncing'}>Синхронизировать</button>
 </header>
 
 <nav>
   {#each tabs as tab (tab.id)}
-    <button class="tab" class:active={screen === tab.id} onclick={() => (screen = tab.id)}>{tab.title}</button>
+    <button data-diagnostic={`navigate.${tab.id}`} class="tab" class:active={screen === tab.id} onclick={() => (screen = tab.id)}>{tab.title}</button>
   {/each}
   {#if conflictCount > 0}
-    <button class="tab conflicts" class:active={screen === 'conflicts'} onclick={() => (screen = 'conflicts')}>
+    <button data-diagnostic="navigate.conflicts" class="tab conflicts" class:active={screen === 'conflicts'} onclick={() => (screen = 'conflicts')}>
       Конфликты <span class="badge warn">{conflictCount}</span>
     </button>
   {/if}

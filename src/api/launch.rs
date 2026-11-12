@@ -64,8 +64,8 @@ pub struct GameProcessDto {
 }
 
 #[tauri::command]
-pub fn get_launch_status(state: State<'_, Launches>) -> LaunchStatus {
-    state.status()
+pub fn get_launch_status(state: State<'_, Launches>, trace_id: Option<String>) -> LaunchStatus {
+    crate::adapters::diagnostics::request_sync(trace_id, "get_launch_status", || state.status())
 }
 
 #[tauri::command]
@@ -73,25 +73,37 @@ pub async fn create_game_shortcut(
     app: tauri::AppHandle,
     game_id: GameId,
     service: State<'_, Arc<ProcessService>>,
+    trace_id: Option<String>,
 ) -> ApiResult<ShortcutDto> {
-    let directory = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .join("launchers");
-    let service = service.inner().clone();
-    let path =
-        tauri::async_runtime::spawn_blocking(move || service.create_shortcut(game_id, &directory))
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))??;
-    Ok(ShortcutDto {
-        path: path.to_string_lossy().into_owned(),
+    crate::adapters::diagnostics::request(trace_id, "create_game_shortcut", async move {
+        let directory = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .join("launchers");
+        let service = service.inner().clone();
+        let path = crate::app::diagnostics::spawn_blocking(move || {
+            service.create_shortcut(game_id, &directory)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))??;
+        Ok(ShortcutDto {
+            path: path.to_string_lossy().into_owned(),
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub async fn begin_game_launch(app: tauri::AppHandle, game_id: GameId) -> ApiResult<LaunchStatus> {
-    crate::app::launch::begin(&app, game_id).await
+pub async fn begin_game_launch(
+    app: tauri::AppHandle,
+    game_id: GameId,
+    trace_id: Option<String>,
+) -> ApiResult<LaunchStatus> {
+    crate::adapters::diagnostics::request(trace_id, "begin_game_launch", async move {
+        crate::app::launch::begin(&app, game_id).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -99,30 +111,51 @@ pub async fn confirm_game_launch(
     app: tauri::AppHandle,
     request_id: uuid::Uuid,
     profile_id: ProfileId,
+    trace_id: Option<String>,
 ) -> ApiResult<LaunchStatus> {
-    crate::app::launch::confirm(&app, request_id, profile_id).await
+    crate::adapters::diagnostics::request(trace_id, "confirm_game_launch", async move {
+        crate::app::launch::confirm(&app, request_id, profile_id).await
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn confirm_local_game_launch(
     app: tauri::AppHandle,
     request_id: uuid::Uuid,
+    trace_id: Option<String>,
 ) -> ApiResult<LaunchStatus> {
-    crate::app::launch::confirm_local(&app, request_id).await
+    crate::adapters::diagnostics::request(trace_id, "confirm_local_game_launch", async move {
+        crate::app::launch::confirm_local(&app, request_id).await
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn cancel_game_launch(app: tauri::AppHandle, request_id: uuid::Uuid) -> ApiResult<()> {
-    crate::app::launch::cancel(&app, Some(request_id))
+pub async fn cancel_game_launch(
+    app: tauri::AppHandle,
+    request_id: uuid::Uuid,
+    trace_id: Option<String>,
+) -> ApiResult<()> {
+    crate::adapters::diagnostics::request(trace_id, "cancel_game_launch", async move {
+        crate::app::launch::cancel(&app, Some(request_id))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn dismiss_launch_dialog(app: tauri::AppHandle) -> ApiResult<()> {
-    crate::app::launch::cancel(&app, None)?;
-    if let Some(window) = app.get_webview_window("launch") {
-        window
-            .hide()
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-    }
-    Ok(())
+pub async fn dismiss_launch_dialog(
+    app: tauri::AppHandle,
+    trace_id: Option<String>,
+) -> ApiResult<()> {
+    crate::adapters::diagnostics::request(trace_id, "dismiss_launch_dialog", async move {
+        crate::app::launch::cancel(&app, None)?;
+        if let Some(window) = app.get_webview_window("launch") {
+            window
+                .hide()
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+        Ok(())
+    })
+    .await
 }

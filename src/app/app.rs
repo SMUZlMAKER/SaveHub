@@ -47,6 +47,7 @@ pub fn start() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            api::diagnostics::record_diagnostic,
             api::features::get_app_features,
             api::manual_saves::get_manual_save_preferences,
             api::manual_saves::get_manual_save_status,
@@ -95,6 +96,14 @@ pub fn start() {
             api::updates::install_update,
         ])
         .setup(move |app| {
+            if let Err(error) = app
+                .path()
+                .app_log_dir()
+                .map_err(|error| std::io::Error::other(error.to_string()))
+                .and_then(crate::adapters::diagnostics::initialize)
+            {
+                eprintln!("Не удалось открыть диагностический лог: {error}");
+            }
             let data_dir = app.path().app_data_dir()?;
             let directory = config::DataDirectory::lock(data_dir.clone())
                 .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
@@ -327,7 +336,7 @@ pub fn start() {
             let shutdown_complete = shutdown_complete.clone();
             let worker = worker.clone();
 
-            tauri::async_runtime::spawn_blocking(move || {
+            crate::app::diagnostics::spawn_blocking(move || {
                 loop {
                     match repo_worker.shutdown() {
                         Ok(()) => break,

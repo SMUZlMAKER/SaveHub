@@ -65,7 +65,7 @@ fn view(app: &AppHandle) -> TrayView {
         profiles,
         active,
         blocker: super::actions::profile_switch_blocker(
-            crate::api::features::get_app_features().profile_switch,
+            crate::api::features::get_app_features(None).profile_switch,
             running.as_deref(),
         ),
         sync_enabled,
@@ -174,6 +174,8 @@ fn build_menu(app: &AppHandle, view: &TrayView) -> tauri::Result<Menu<Wry>> {
 }
 
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {
+    // IDs are fixed action names or profile UUIDs; never menu labels.
+    crate::adapters::diagnostics::event("tray_click", &format!("action={}", event.id.as_ref()));
     match event.id.as_ref() {
         "sync" => sync_from_tray(app),
         "profiles" => open_screen(app, "profiles"),
@@ -201,7 +203,7 @@ fn sync_from_tray(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         let action_app = app.clone();
         let result =
-            tauri::async_runtime::spawn_blocking(move || super::actions::sync_now(&action_app))
+            crate::app::diagnostics::spawn_blocking(move || super::actions::sync_now(&action_app))
                 .await
                 .unwrap_or_else(|error| Err(ApiError::Internal(error.to_string())));
         if let Err(error) = result {
@@ -215,7 +217,7 @@ fn run_action(
     action: impl FnOnce(AppHandle) -> Result<(), ApiError> + Send + 'static,
 ) {
     let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::app::diagnostics::spawn_blocking(move || {
         if let Err(error) = action(app.clone()) {
             show_error(&app, error);
         }

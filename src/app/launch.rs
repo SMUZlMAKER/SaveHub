@@ -51,6 +51,7 @@ impl Launches {
         let _ = app.emit(events::LAUNCH_STATUS_CHANGED, next);
     }
     pub fn publish(&self, app: &tauri::AppHandle, mut status: LaunchStatus) {
+        crate::adapters::diagnostics::event("launch_status", &format!("phase={}", status.phase));
         {
             let mut current = self.status.lock().unwrap();
             if self.cancel_requested.load(Ordering::SeqCst)
@@ -144,7 +145,7 @@ async fn prepare(app: &tauri::AppHandle, game_id: GameId) -> ApiResult<LaunchSta
         .join("launchers");
     let workflow = app.state::<Arc<LaunchGame>>().inner().clone();
     let games = app.state::<Arc<GameService>>().inner().clone();
-    let (plan, game) = tauri::async_runtime::spawn_blocking(move || {
+    let (plan, game) = crate::app::diagnostics::spawn_blocking(move || {
         games.restore_launcher_registration(game_id, &directory)?;
         let game = games.get(game_id)?;
         Ok::<_, crate::services::ServiceError>((workflow.prepare()?, game))
@@ -265,7 +266,7 @@ async fn execute_with_policy(
     }
     let workflow = app.state::<Arc<LaunchGame>>().inner().clone();
     let launch_app = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    let result = crate::app::diagnostics::spawn_blocking(move || {
         let proceed = || {
             !launch_app
                 .state::<Launches>()
@@ -397,7 +398,7 @@ pub fn handle_arguments(app: tauri::AppHandle, args: Vec<String>) {
         }
         return;
     }
-    tauri::async_runtime::spawn(async move {
+    crate::app::diagnostics::spawn(async move {
         for _ in 0..100 {
             if app.try_state::<LaunchReady>().is_some() {
                 break;

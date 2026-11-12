@@ -202,3 +202,12 @@ export interface GameProcessEvent {
 
 export interface ManualSavePreferences { shortcut: string; error: string | null }
 export interface ManualSaveStatus { sequence: number; success: boolean; message: string }
+
+/** Local telemetry metadata; never includes user input, tokens or error text. */
+export interface DiagnosticEvent {
+  traceId: string;
+  action: string;
+  phase: 'success' | 'error' | 'click' | 'unhandledError' | 'unhandledRejection';
+  elapsedMs?: number;
+  errorKind?: ApiErrorKind | 'unknown';
+}

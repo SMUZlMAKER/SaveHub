@@ -48,6 +48,8 @@ impl SwitchProfile {
 
     /// The caller holds operations and has refreshed process state.
     fn execute_locked(&self, profile_id: &ProfileId) -> ServiceResult<()> {
+        let _diagnostic_span =
+            crate::adapters::diagnostics::Span::new("switch_profile.execute_locked");
         self.profiles.get(profile_id)?;
         let running = self
             .processes

@@ -6,11 +6,20 @@ use std::path::{Component, Path, PathBuf};
 
 impl From<git2::Error> for AdapterError {
     fn from(error: git2::Error) -> Self {
+        // Git messages may contain authenticated URLs; record only structured codes.
+        super::diagnostics::event(
+            "git_error",
+            &format!("class={:?} code={:?}", error.class(), error.code()),
+        );
         Self::Git(error.message().to_owned())
     }
 }
 impl From<std::io::Error> for AdapterError {
     fn from(error: std::io::Error) -> Self {
+        super::diagnostics::event(
+            "io_error",
+            &format!("kind={:?} os_code={:?}", error.kind(), error.raw_os_error()),
+        );
         Self::Io(error)
     }
 }
@@ -159,7 +168,10 @@ pub fn prepare_repository_root(path: &Path, initialize_if_missing: bool) -> Adap
 
 /// Locate an already materialized tree without creating branches or worktrees.
 pub fn existing_worktree(root: &Path, branch: &str, key: &str) -> AdapterResult<Option<PathBuf>> {
-    let repo = Repository::open(root)?;
+    let repo = Repository::open(root).map_err(|error| {
+        super::diagnostics::event("open_repository_failed", &format!("path={root:?}"));
+        AdapterError::from(error)
+    })?;
     let reference = format!("refs/heads/{branch}");
     if !git2::Reference::is_valid_name(&reference) {
         return Err(invalid("Invalid branch"));
@@ -176,7 +188,10 @@ pub fn existing_worktree(root: &Path, branch: &str, key: &str) -> AdapterResult<
     relative(Path::new(key))?;
     let path = repo.commondir().join("savehub/trees").join(key);
     if fs::exists(&path)? {
-        let tree = Repository::open(&path)?;
+        let tree = Repository::open(&path).map_err(|error| {
+            super::diagnostics::event("open_worktree_failed", &format!("path={path:?}"));
+            AdapterError::from(error)
+        })?;
         if tree.commondir().canonicalize()? != repo.commondir().canonicalize()?
             || tree.head()?.name().ok() != Some(reference.as_str())
         {
@@ -409,6 +424,7 @@ pub fn select_merge_commit(
     remote: bool,
     local_resolution: Option<&str>,
 ) -> AdapterResult<CommitId> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("git.select_merge_commit");
     let repository = Repository::open(repo)?;
     if repository.state() != RepositoryState::Merge {
         return Err(invalid("No merge in progress"));
@@ -462,6 +478,7 @@ pub fn commit_files(
     files: &[(&str, &[u8])],
     message: &str,
 ) -> AdapterResult<CommitId> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("git.commit_files");
     let repository = Repository::open(repo)?;
     let mut builder = repository.treebuilder(None)?;
     for (name, data) in files {
@@ -484,6 +501,7 @@ pub fn commit_files(
 }
 
 pub fn clone(url: &str, path: &Path, token: &str) -> AdapterResult<()> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("git.clone");
     let mut options = git2::FetchOptions::new();
     options.remote_callbacks(callbacks(token));
     git2::build::RepoBuilder::new()
@@ -544,6 +562,7 @@ pub fn validate_remote(repo: &Path, name: &str, url: &str) -> AdapterResult<()> 
 }
 
 pub fn fetch(repo: &Path, remote: &str, token: &str) -> AdapterResult<()> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("git.fetch");
     let repo = Repository::open(repo)?;
     let mut options = git2::FetchOptions::new();
     options.remote_callbacks(callbacks(token));
@@ -553,6 +572,7 @@ pub fn fetch(repo: &Path, remote: &str, token: &str) -> AdapterResult<()> {
 }
 
 pub fn push(repo: &Path, remote: &str, refspec: &str, token: &str) -> AdapterResult<()> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("git.push");
     let repo = Repository::open(repo)?;
     let mut rejected = false;
     let mut callbacks = callbacks(token);
@@ -578,6 +598,7 @@ pub fn delete_remote_branch(
     branch: &str,
     token: &str,
 ) -> AdapterResult<()> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("git.delete_remote_branch");
     let reference = format!("refs/heads/{branch}");
     if !git2::Reference::is_valid_name(&reference) {
         return Err(invalid("Invalid branch"));
@@ -607,6 +628,7 @@ pub fn push_with_lease(
     commit: &str,
     token: &str,
 ) -> AdapterResult<()> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("git.push_with_lease");
     push_with_lease_before_update(repo, remote, branch, expected_remote, commit, token, || {
         Ok(())
     })
@@ -818,6 +840,8 @@ pub fn archive_profile_branch(
     branch: &str,
     key: &str,
 ) -> AdapterResult<Option<PathBuf>> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("git.archive_profile_branch");
+    super::diagnostics::event("archive_profile", &format!("root={root:?} key={key:?}"));
     relative(Path::new(key))?;
     if Path::new(key).components().count() != 1 {
         return Err(invalid("Expected one worktree key"));
@@ -852,6 +876,7 @@ pub fn archive_profile_branch(
     for name in repo.worktrees()?.iter() {
         let name = name?.ok_or_else(|| invalid("Non-UTF-8 worktree name"))?;
         let worktree = repo.find_worktree(name)?;
+        super::diagnostics::event("inspect_worktree", &format!("path={:?}", worktree.path()));
         // Read HEAD from registered metadata first. An unrelated worktree may have
         // been moved or removed; its missing directory must not block this deletion.
         let tree = Repository::open(repo.commondir().join("worktrees").join(name))?;
@@ -971,6 +996,7 @@ pub fn create_worktree(
     path: &Path,
     from: Option<&str>,
 ) -> AdapterResult<()> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("git.create_worktree");
     let repo = Repository::open(repo)?;
     let reference_name = format!("refs/heads/{branch}");
     if !git2::Reference::is_valid_name(&reference_name) {
@@ -1083,6 +1109,7 @@ fn signature(repo: &Repository) -> AdapterResult<git2::Signature<'static>> {
 }
 
 pub fn commit(repo: &Path, message: &str) -> AdapterResult<CommitId> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("git.commit");
     let mut repo = Repository::open(repo)?;
     let mut merge_heads = Vec::new();
     if repo.state() == RepositoryState::Merge {
@@ -1137,6 +1164,7 @@ pub fn will_fast_forward(repo: &Path, revision: &str) -> AdapterResult<bool> {
 }
 
 pub fn merge(repo: &Path, revision: &str, fast_forward_only: bool) -> AdapterResult<MergeOutcome> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("git.merge");
     let repository = Repository::open(repo)?;
     let theirs = repository.revparse_single(revision)?.peel_to_commit()?;
     let annotated = repository.find_annotated_commit(theirs.id())?;

@@ -25,9 +25,14 @@ pub fn profile_switch_blocker(
 }
 
 pub fn switch_profile(app: &tauri::AppHandle, profile_id: ProfileId) -> ApiResult<()> {
+    crate::adapters::diagnostics::event("switch_profile", &format!("start profile={profile_id}"));
     let result = app
         .state::<Arc<crate::workflows::SwitchProfile>>()
         .execute(&profile_id);
+    crate::adapters::diagnostics::event(
+        "switch_profile",
+        &format!("finish profile={profile_id} success={}", result.is_ok()),
+    );
     // Refresh after errors too: the workflow can publish conflicts before stopping.
     for event in [
         crate::api::events::PROFILE_CHANGED,

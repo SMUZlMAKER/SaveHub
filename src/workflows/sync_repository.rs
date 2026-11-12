@@ -241,6 +241,13 @@ impl SyncRepository {
     }
 
     fn publish_result(&self, failure: Option<&ServiceError>, exchanged: bool) {
+        if let Some(error) = failure {
+            crate::services::log_error(error);
+        }
+        crate::adapters::diagnostics::event(
+            "sync_result",
+            &format!("success={} exchanged={exchanged}", failure.is_none()),
+        );
         let previous = self.runtime.sync_status();
         let error = failure
             .map(|error| format!("{error:?}"))

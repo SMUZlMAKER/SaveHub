@@ -39,7 +39,7 @@ impl ManualSaves {
         let handle = app.clone();
         let keyboard = hotkey::Hotkey::start(move || {
             let app = handle.clone();
-            tauri::async_runtime::spawn(async move {
+            crate::app::diagnostics::spawn(async move {
                 let shortcut = {
                     let state = app.state::<ManualSaves>();
                     state
@@ -113,6 +113,10 @@ impl ManualSaves {
         Ok(())
     }
     fn publish(&self, app: &tauri::AppHandle, success: bool, message: String) {
+        crate::adapters::diagnostics::event(
+            "manual_snapshot_result",
+            &format!("success={success}"),
+        );
         let next = {
             let mut status = self.status.lock().unwrap();
             *status = ManualSaveStatus {
@@ -130,7 +134,7 @@ impl ManualSaves {
             }
         }
         let app = app.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::app::diagnostics::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(6)).await;
             if app.state::<ManualSaves>().status().sequence == next.sequence {
                 if let Some(window) = app.get_webview_window("save-toast") {
@@ -143,7 +147,7 @@ impl ManualSaves {
 
 pub async fn capture(app: tauri::AppHandle, game: Option<GameId>) -> ApiResult<()> {
     let worker_app = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || -> ApiResult<String> {
+    let result = crate::app::diagnostics::spawn_blocking(move || -> ApiResult<String> {
         let operations = worker_app.state::<Arc<Mutex<()>>>();
         let _guard = operations.try_lock().map_err(|_| ApiError::Rejected("SaveHub занят другой операцией. Повторите ручной снимок".into()))?;
         worker_app.state::<Arc<ProcessService>>().refresh_running_games()?;
