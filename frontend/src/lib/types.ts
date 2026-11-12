@@ -56,9 +56,7 @@ export interface SaveConflict {
 
 export type SaveConflictResolution =
   | "keepLocal"
-  | "keepRemote"
-  | "keepBothLocalFirst"
-  | "keepBothRemoteFirst";
+  | "keepRemote";
 
 export type SaveKind =
   | "beforeSwitch"
@@ -103,15 +101,26 @@ export interface Conflict {
   id: string;
   gameId: string;
   gameName: string;
+  profileId: string;
+  profileName: string;
+  profileBranch: string;
+  filePath: string;
   local: SaveVersion;
   remote: SaveVersion;
+  localCommit: ConflictCommit;
+  remoteCommit: ConflictCommit;
+}
+
+export interface ConflictCommit {
+  id: string;
+  /** Unix-время коммита, мс */
+  committedAt: number;
+  summary: string;
 }
 
 export type ConflictResolution =
   | "keepLocal"
-  | "keepRemote"
-  | "keepBothLocalFirst"
-  | "keepBothRemoteFirst";
+  | "keepRemote";
 
 export interface Settings {
   catalogRepoUrl: string | null;
@@ -120,7 +129,6 @@ export interface Settings {
   hasGithubToken: boolean;
   syncAfterSession: boolean;
   syncWhileGaming: boolean;
-  autoSwitchProfile: boolean;
   askProfileBeforeLaunch: boolean;
 }
 
@@ -176,7 +184,7 @@ export interface LaunchStatus {
   requestId: string | null;
   gameId: string | null;
   gameName: string | null;
-  phase: 'idle' | 'preparing' | 'starting' | 'awaitingProfile' | 'running' | 'stopped' | 'cancelled' | 'error';
+  phase: 'idle' | 'preparing' | 'starting' | 'awaitingProfile' | 'awaitingLocalLaunch' | 'running' | 'stopped' | 'cancelled' | 'error';
   profiles: LaunchProfile[];
   activeProfileId: string | null;
   warnings: string[];

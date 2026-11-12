@@ -1,24 +1,50 @@
 <script lang="ts">
-  import type { AppFeatures } from '../lib/types'
+  import type { AppFeatures, Conflict, ConflictCommit } from '../lib/types'
   let { features }: { features: AppFeatures } = $props()
 
   import { onMount } from 'svelte'
   import { api, describeError, events, subscribe } from '../lib/api'
-  import { formatAgo, formatSize } from '../lib/format'
   import { notice } from '../lib/notice.svelte'
-  import type { Conflict, ConflictResolution, SaveVersion } from '../lib/types'
   import Loadable from '../lib/components/Loadable.svelte'
 
   type Side = 'local' | 'remote'
-  type Choice = { side: Side }
+  interface ConflictGroup {
+    profileId: string
+    profileName: string
+    profileBranch: string
+    localCommit: ConflictCommit
+    remoteCommit: ConflictCommit
+    files: Conflict[]
+  }
 
   let conflicts = $state<Conflict[]>([])
   let loading = $state(true)
   let loadError = $state<string | null>(null)
-  let choices = $state<Record<string, Choice>>({})
+  let choices = $state<Record<string, 'keepLocal' | 'keepRemote'>>({})
 
   let generation = 0
   let applying = $state(false)
+  let confirming = $state<string | null>(null)
+
+  const groups = $derived.by(() => {
+    const byProfile = new Map<string, ConflictGroup>()
+    for (const conflict of conflicts) {
+      let group = byProfile.get(conflict.profileId)
+      if (!group) {
+        group = {
+          profileId: conflict.profileId,
+          profileName: conflict.profileName,
+          profileBranch: conflict.profileBranch,
+          localCommit: conflict.localCommit,
+          remoteCommit: conflict.remoteCommit,
+          files: [],
+        }
+        byProfile.set(conflict.profileId, group)
+      }
+      group.files.push(conflict)
+    }
+    return [...byProfile.values()]
+  })
 
   async function load() {
     const current = ++generation
@@ -26,12 +52,6 @@
       const result = await api.listConflicts()
       if (current !== generation) return
       conflicts = result
-      for (const c of conflicts) {
-        // По умолчанию — более свежая версия
-        choices[c.id] ??= {
-          side: c.local.modifiedAt >= c.remote.modifiedAt ? 'local' : 'remote',
-        }
-      }
       loadError = null
     } catch (e) {
       if (current === generation) loadError = describeError(e)
@@ -40,19 +60,30 @@
     }
   }
 
-  function resolution({ side }: Choice): ConflictResolution {
-    return side === 'local' ? 'keepLocal' : 'keepRemote'
+  function formatCommitDate(timestamp: number): string {
+    return timestamp > 0
+      ? new Date(timestamp).toLocaleString('ru-RU')
+      : 'время коммита неизвестно'
   }
 
-  async function apply(conflict: Conflict) {
+  async function apply(group: ConflictGroup) {
     if (applying) return
+    const resolution = choices[group.profileId]
+    if (!resolution) return
     applying = true
     try {
-      await api.resolveConflict(conflict.id, resolution(choices[conflict.id]))
-      notice.show(`${conflict.gameName}: конфликт решён`)
+      await api.resolveConflict(group.files[0].id, resolution)
+      confirming = null
+      notice.show(
+        resolution === 'keepLocal'
+          ? `${group.profileName}: локальный коммит выбран и опубликован в origin.`
+          : `${group.profileName}: профиль переключён на коммит из origin.`,
+      )
       await load()
     } catch (e) {
+      confirming = null
       notice.error(e)
+      await load()
     } finally { applying = false }
   }
 
@@ -63,36 +94,51 @@
   })
 </script>
 
-{#snippet version(conflict: Conflict, side: Side, v: SaveVersion)}
+{#snippet commit(group: ConflictGroup, side: Side, value: ConflictCommit)}
   <button
     type="button"
     class="version"
     disabled={applying}
-    class:selected={choices[conflict.id]?.side === side}
-    onclick={() => (choices[conflict.id].side = side)}
+    class:selected={choices[group.profileId] === (side === 'local' ? 'keepLocal' : 'keepRemote')}
+    onclick={() => {
+      choices[group.profileId] = side === 'local' ? 'keepLocal' : 'keepRemote'
+      confirming = null
+    }}
   >
-    <strong>{v.machineName}</strong>
-    <span class="muted block">изменено {formatAgo(v.modifiedAt)}</span>
-    <span class="muted block">{formatSize(v.sizeBytes)}</span>
+    <strong>{side === 'local' ? 'Локальная версия профиля' : 'Версия профиля из origin'}</strong>
+    <span class="muted block">{formatCommitDate(value.committedAt)}</span>
+    <span class="muted block"><code>{value.id.slice(0, 8)}</code> · {value.summary || 'без описания'}</span>
   </button>
 {/snippet}
 
 <h2>Конфликты сохранений</h2>
-<p class="muted">Сохранение изменили на двух ПК независимо. Выбери, какую версию оставить.</p>
+<p class="muted">Выберите, какая версия профиля останется: локальная или полученная из origin. Выбор применяется ко всем сохранениям профиля.</p>
 
-{#if !features.conflicts}<p class="availability-note">Проверка и разрешение конфликтов пока недоступны в этой версии. Сравнение сохранений между компьютерами ещё не выполняется.</p>{/if}
+{#if !features.conflicts}<p class="availability-note">Проверка и разрешение конфликтов пока недоступны в этой версии.</p>{/if}
 {#if features.conflicts}
 <Loadable {loading} error={loadError}>
-  {#each conflicts as conflict (conflict.id)}
+  {#each groups as group (group.profileId)}
     <section class="card">
-      <h3>{conflict.gameName}</h3>
+      <h3>{group.profileName}</h3>
+      <p class="muted">Ветка <code>{group.profileBranch}</code> · {group.files.length} конфликтующих файлов</p>
       <div class="versions">
-        {@render version(conflict, 'local', conflict.local)}
-        {@render version(conflict, 'remote', conflict.remote)}
+        {@render commit(group, 'local', group.localCommit)}
+        {@render commit(group, 'remote', group.remoteCommit)}
       </div>
-      <p class="muted">Обе версии сохраняются в технической резервной копии репозитория. Они не появятся отдельными записями в истории сохранений.</p>
+      {#if choices[group.profileId] === 'keepLocal'}
+        <p class="muted">Локальный коммит станет HEAD. Для этого удалённая ветка профиля будет заменена выбранным локальным коммитом; другая сторона станет недоступна через SaveHub, отменить выбор здесь нельзя.</p>
+      {:else if choices[group.profileId] === 'keepRemote'}
+        <p class="muted">Коммит из origin станет HEAD локального профиля. Локальная сторона перестанет быть HEAD профиля; отменить выбор через SaveHub нельзя.</p>
+      {:else}
+        <p class="muted">Выберите одну из сторон. Решение применится сразу ко всем файлам профиля; остальные изменения выбранного коммита также станут активными.</p>
+      {/if}
       <div class="actions">
-        <button class="primary" disabled={applying} onclick={() => apply(conflict)}>{applying ? 'Применяем…' : 'Применить'}</button>
+        {#if confirming === group.profileId}
+          <button disabled={applying} onclick={() => (confirming = null)}>Назад</button>
+          <button class="danger" disabled={applying} onclick={() => apply(group)}>{applying ? 'Применяем…' : 'Подтвердить без отмены'}</button>
+        {:else}
+          <button class="primary" disabled={applying || !choices[group.profileId]} onclick={() => (confirming = group.profileId)}>Применить выбранный коммит</button>
+        {/if}
       </div>
     </section>
   {:else}

@@ -65,16 +65,19 @@ impl SettingsService {
         data.local_repo_path = data
             .local_repo_path
             .filter(|path| !path.as_os_str().is_empty());
+        if let Some(url) = &data.repo_url {
+            validate_catalog_url(url)?;
+        }
         if let Some(path) = &data.local_repo_path {
             if !path.is_absolute() {
                 return Err(ServiceError::InvalidInput(
                     "Укажите абсолютный путь репозитория".into(),
                 ));
             }
-            crate::adapters::git::validate_repository_root(path).map_err(ServiceError::Adapter)?;
+            crate::adapters::git::prepare_repository_root(path, data.repo_url.is_none())
+                .map_err(ServiceError::Adapter)?;
         }
         if let Some(url) = &data.repo_url {
-            validate_catalog_url(url)?;
             if let Some(path) = &data.local_repo_path {
                 if path.join(".git").exists() {
                     crate::adapters::git::validate_remote(path, "origin", url)
@@ -233,6 +236,44 @@ mod catalog_tests {
             assert!(fixture.service.get().unwrap().local_repo_path.is_none());
         }
         fixture.service.set_repository(None, Some(root)).unwrap();
+    }
+
+    #[test]
+    fn local_directory_without_git_is_initialized_without_changing_its_files() {
+        let fixture = Fixture::new();
+        let path = fixture.root.join("local-saves");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("save.dat"), b"existing save").unwrap();
+
+        fixture
+            .service
+            .set_repository(None, Some(path.clone()))
+            .unwrap();
+
+        assert!(git2::Repository::open(&path).is_ok());
+        assert_eq!(
+            std::fs::read(path.join("save.dat")).unwrap(),
+            b"existing save"
+        );
+        assert_eq!(fixture.service.get().unwrap().local_repo_path, Some(path));
+    }
+
+    #[test]
+    fn github_clone_target_without_git_is_not_initialized_before_connecting() {
+        let fixture = Fixture::new();
+        let path = fixture.root.join("clone-target");
+        std::fs::create_dir(&path).unwrap();
+
+        fixture
+            .service
+            .set_repository(
+                Some("https://github.com/test/saves".into()),
+                Some(path.clone()),
+            )
+            .unwrap();
+
+        assert!(git2::Repository::open(&path).is_err());
+        assert_eq!(fixture.service.get().unwrap().local_repo_path, Some(path));
     }
 
     #[test]

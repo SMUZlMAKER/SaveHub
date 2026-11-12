@@ -67,12 +67,40 @@ impl LaunchGame {
         profile_id: ProfileId,
         proceed: impl FnOnce() -> bool,
     ) -> ServiceResult<u32> {
+        self.execute_guarded_with_refresh(game_id, profile_id, true, proceed)
+    }
+
+    pub fn execute_guarded_locally(
+        &self,
+        game_id: GameId,
+        profile_id: ProfileId,
+        proceed: impl FnOnce() -> bool,
+    ) -> ServiceResult<u32> {
+        self.execute_guarded_with_refresh(game_id, profile_id, false, proceed)
+    }
+
+    fn execute_guarded_with_refresh(
+        &self,
+        game_id: GameId,
+        profile_id: ProfileId,
+        refresh_active_profile: bool,
+        proceed: impl FnOnce() -> bool,
+    ) -> ServiceResult<u32> {
         self.profiles.get(&profile_id)?;
         if self.profiles.active()?.map(|p| p.id) != Some(profile_id) {
+            if !refresh_active_profile {
+                return Err(ServiceError::Conflict(
+                    "Активный профиль изменился; повторите запуск".into(),
+                ));
+            }
             let switch = self.switch.as_ref().ok_or_else(|| {
                 ServiceError::Conflict("Переключение сохранений не настроено".into())
             })?;
             switch.execute(&profile_id)?;
+        } else if refresh_active_profile {
+            if let Some(switch) = &self.switch {
+                switch.refresh_active_profile()?;
+            }
         }
         let _guard = self
             .operations

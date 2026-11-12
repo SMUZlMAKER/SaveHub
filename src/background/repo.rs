@@ -273,6 +273,7 @@ struct RepoWorkerLoop {
     checkpoint_retry_after: Instant,
     next_commit_allowed: Instant,
     checkpoint_forced: bool,
+    force_sync: bool,
     operations_retry_after: Instant,
 }
 
@@ -289,6 +290,7 @@ impl RepoWorkerLoop {
             checkpoint_retry_after: now,
             next_commit_allowed: now,
             checkpoint_forced: false,
+            force_sync: false,
             operations_retry_after: now,
         }
     }
@@ -345,6 +347,7 @@ impl RepoWorkerLoop {
 
     fn schedule_requests(&mut self, requests: &Requests, now: Instant) {
         let force_checkpoint = requests.sync || requests.flush.is_some();
+        self.force_sync |= force_checkpoint;
 
         if requests.wake || force_checkpoint {
             self.scan_due = now;
@@ -370,9 +373,14 @@ impl RepoWorkerLoop {
     }
 
     fn next_deadline(&self) -> Instant {
-        let mut deadline = self.checkpoint_deadline().min(self.fetch_due);
+        let checkpoint_due = if self.sync.can_checkpoint() {
+            self.checkpoint_deadline()
+        } else {
+            self.fetch_due
+        };
+        let mut deadline = checkpoint_due.min(self.fetch_due);
 
-        if self.sync.has_pending_push() {
+        if self.sync.has_pending_push() && (self.force_sync || self.sync.auto_push_allowed()) {
             deadline = deadline.min(self.push_due);
         }
 
@@ -385,8 +393,9 @@ impl RepoWorkerLoop {
         }
 
         let request = SyncRequest {
-            checkpoint: now >= self.checkpoint_deadline(),
-            push: now >= self.push_due,
+            checkpoint: flushing
+                || (self.sync.can_checkpoint() && now >= self.checkpoint_deadline()),
+            push: now >= self.push_due && (self.force_sync || self.sync.auto_push_allowed()),
             fetch: now >= self.fetch_due && !flushing,
         };
 
@@ -418,6 +427,7 @@ impl RepoWorkerLoop {
                 }
             }
             Ok(SyncAttempt::Completed(outcome)) => {
+                self.force_sync = false;
                 self.schedule_next_attempts(finished_at, &outcome);
                 outcome.into_result()
             }

@@ -27,6 +27,13 @@
     catch (e) { error = describeError(e) }
     finally { busy = false }
   }
+  async function playLocally() {
+    if (!status?.requestId || busy) return
+    busy = true; error = ''
+    try { accept(await api.confirmLocalGameLaunch(status.requestId)) }
+    catch (e) { error = describeError(e) }
+    finally { busy = false }
+  }
   async function cancel() {
     if (!status?.requestId || busy) return
     busy = true; error = ''
@@ -36,7 +43,7 @@
   }
 </script>
 
-{#if status && (['preparing', 'starting', 'awaitingProfile'].includes(status.phase) || status.error || status.monitorError)}
+{#if status && (['preparing', 'starting', 'awaitingProfile', 'awaitingLocalLaunch'].includes(status.phase) || status.error || status.monitorError)}
   <section class="card launch-panel" class:compact aria-label="Запуск игры" aria-live="polite">
     <h3>{status.gameName ?? 'Запуск через SaveHub'}</h3>
     {#if status.phase === 'preparing'}<p role="status">Подготавливаем запуск…</p>
@@ -51,6 +58,9 @@
       </label>
       <p class="muted">Перед запуском SaveHub переключит сохранения на выбранный профиль. Для переключения закройте другие игры.</p>
       <div class="actions"><button class="primary" onclick={confirm} disabled={busy || !profileId}>{busy ? 'Запуск…' : 'Запустить игру'}</button><button onclick={cancel} disabled={busy}>Отмена</button></div>
+    {:else if status.phase === 'awaitingLocalLaunch'}
+      <p class="availability-note" role="status">{status.warnings[0] ?? 'Не удалось обновить сохранения из репозитория. Можно продолжить с локальной версией.'}</p>
+      <div class="actions"><button class="primary" onclick={playLocally} disabled={busy}>{busy ? 'Запуск…' : 'Играть локально'}</button><button onclick={cancel} disabled={busy}>Отмена</button></div>
     {:else if status.phase === 'running'}<p role="status">Игра запущена{status.pid ? ` · PID ${status.pid}` : ''}. {status.monitorError ? 'Состояние процесса временно неизвестно.' : 'SaveHub следит за процессом.'}</p>
     {:else if status.phase === 'stopped'}<p role="status">Процесс игры завершён.</p>
     {:else if status.phase === 'cancelled'}<p role="status">Запуск отменён.</p>{/if}
@@ -63,7 +73,7 @@
   <DevNote file="src/workflows/launch_game.rs" commands={['begin_game_launch', 'confirm_game_launch']}
     notes={[
       `${status.gameName ?? 'Игра'}: ${status.phase}${status.pid ? ` · PID ${status.pid}` : ''}`,
-      'Проверка актуальности сохранений и блокировка сессии на другом ПК пока не реализованы; используются текущие локальные файлы.',
+      'Удалённые сохранения применяются перед запуском; блокировка одновременной игровой сессии на другом ПК пока не реализована.',
     ]} />
 {/if}
 

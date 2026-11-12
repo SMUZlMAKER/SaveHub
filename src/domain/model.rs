@@ -15,6 +15,36 @@ pub struct Profile {
     pub last_played_game: Option<GameId>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileDeletion {
+    pub id: ProfileId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ProfileDeletion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StoredDeletion {
+            Legacy(ProfileId),
+            Current {
+                id: ProfileId,
+                #[serde(default)]
+                branch: Option<String>,
+            },
+        }
+
+        match StoredDeletion::deserialize(deserializer)? {
+            StoredDeletion::Legacy(id) => Ok(Self { id, branch: None }),
+            StoredDeletion::Current { id, branch } => Ok(Self { id, branch }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryConfig {
     pub url: String,
@@ -87,21 +117,28 @@ pub struct SaveVersion {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConflictCommit {
+    pub id: String,
+    pub committed_at: u64,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conflict {
     pub id: ConflictId,
     pub game_id: GameId,
     pub profile_id: ProfileId,
+    pub file_path: PathBuf,
     pub local: SaveVersion,
     pub remote: SaveVersion,
+    pub local_commit: ConflictCommit,
+    pub remote_commit: ConflictCommit,
 }
 
 #[derive(Debug, Clone)]
 pub enum ConflictResolution {
     KeepLocal,
     KeepRemote,
-    KeepBothLocalFirst,
-    KeepBothRemoteFirst,
-    CreateProfile { name: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,5 +184,20 @@ mod session_compatibility_tests {
         assert!(save.session_id.is_none());
         assert!(save.session_started_at.is_none());
         assert!(save.session_ended_at.is_none());
+    }
+
+    #[test]
+    fn profile_deletion_markers_read_legacy_ids_and_current_records() {
+        let id = uuid::Uuid::new_v4();
+        let legacy: Vec<super::ProfileDeletion> =
+            serde_json::from_value(serde_json::json!([id])).unwrap();
+        assert_eq!(legacy[0].id, id);
+        assert_eq!(legacy[0].branch, None);
+
+        let current: Vec<super::ProfileDeletion> = serde_json::from_value(serde_json::json!([
+            { "id": id, "branch": "profiles/test" }
+        ]))
+        .unwrap();
+        assert_eq!(current[0].branch.as_deref(), Some("profiles/test"));
     }
 }

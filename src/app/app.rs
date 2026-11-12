@@ -58,6 +58,7 @@ pub fn start() {
             api::launch::create_game_shortcut,
             api::launch::begin_game_launch,
             api::launch::confirm_game_launch,
+            api::launch::confirm_local_game_launch,
             api::launch::cancel_game_launch,
             api::games::list_games,
             api::games::get_catalog_status,
@@ -85,6 +86,7 @@ pub fn start() {
             api::sync::resolve_conflict,
             api::settings::get_settings,
             api::settings::update_settings,
+            api::settings::connect_repository,
             api::settings::set_github_token,
             api::updates::get_app_preferences,
             api::updates::save_app_preferences,
@@ -234,6 +236,13 @@ pub fn start() {
                 )
                 .with_saves(saves.clone(), switch.clone(), operations.clone()),
             ));
+            app.manage(Arc::new(crate::workflows::manual_sync::ManualSync::new(
+                repo_service.clone(),
+                catalog.clone(),
+                runtime.clone(),
+                process_service.clone(),
+                operations.clone(),
+            )));
             app.manage(switch);
             app.manage(saves);
             app.manage(process_service);

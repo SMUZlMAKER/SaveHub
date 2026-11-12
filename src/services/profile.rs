@@ -76,9 +76,10 @@ impl ProfileService {
                 "Имя профиля не может быть пустым".into(),
             ));
         }
-        let branch = self.repo.create_profile_branch(name)?;
+        let id = uuid::Uuid::new_v4();
+        let branch = self.repo.create_profile_branch(name, id)?;
         let profile = Profile {
-            id: uuid::Uuid::new_v4(),
+            id,
             branch,
             name: name.to_owned(),
             last_played_game: None,
@@ -135,9 +136,15 @@ impl ProfileService {
             ));
         }
         let profile = self.get(profile_id)?;
+        self.repo.mark_profile_deleted(&profile)?;
         self.catalog.remove_profile(profile_id);
         if let Err(error) = self.persist() {
             self.catalog.add_profile(profile);
+            if let Err(rollback) = self.repo.unmark_profile_deleted(profile_id) {
+                return Err(ServiceError::Conflict(format!(
+                    "Сохранение списка профилей: {error:?}; откат отметки удаления: {rollback:?}"
+                )));
+            }
             return Err(error);
         }
         // RepoService validates the profile through Catalog, so retain it until archival completes.
@@ -148,6 +155,13 @@ impl ProfileService {
                     "Удаление: {error:?}; восстановление метаданных: {rollback:?}"
                 ))
             })?;
+            self.repo
+                .unmark_profile_deleted(profile_id)
+                .map_err(|rollback| {
+                    ServiceError::Conflict(format!(
+                        "Удаление: {error:?}; откат отметки удаления: {rollback:?}"
+                    ))
+                })?;
             return Err(error);
         }
         self.catalog.remove_profile(profile_id);
@@ -252,7 +266,8 @@ mod tests {
         let repository = git2::Repository::open(&fixture.root).unwrap();
         repository.set_head("refs/heads/master").unwrap();
         let profile = fixture.service.create("Master").unwrap();
-        assert_eq!(profile.branch, "master-2");
+        assert!(profile.branch.starts_with("master-"));
+        assert!(profile.branch.ends_with(&profile.id.simple().to_string()));
         assert!(repository.head().is_err());
         fixture.service.runtime.set_running_games(Vec::new());
         fixture.service.delete(&profile.id).unwrap();
@@ -272,7 +287,8 @@ mod tests {
                 .is_empty()
         );
         std::fs::remove_dir(directory.join("profiles.json")).unwrap();
-        assert_eq!(fixture.service.create("Retry").unwrap().branch, "retry");
+        let profile = fixture.service.create("Retry").unwrap();
+        assert!(profile.branch.starts_with("retry-"));
     }
 
     #[test]
@@ -308,6 +324,36 @@ mod tests {
             .map(|item| item.unwrap().target().unwrap())
             .collect();
         assert!(archives.contains(&tip));
+    }
+
+    #[test]
+    fn deletion_persists_a_tombstone_before_removing_profile_metadata() {
+        let mut fixture = Fixture::new();
+        let directory = fixture.root.join("local-data");
+        fixture.service.persistence = Some(directory.clone());
+        fixture.service.repo = Arc::new(
+            RepoService::new(
+                fixture.service.catalog.clone(),
+                fixture.service.runtime.clone(),
+                fixture.settings.clone(),
+            )
+            .persistent(directory.clone()),
+        );
+        fixture.service.runtime.set_running_games(Vec::new());
+        let profile = fixture.service.create("Persistent deletion").unwrap();
+
+        fixture.service.delete(&profile.id).unwrap();
+
+        assert!(fixture.service.get(&profile.id).is_err());
+        assert!(
+            crate::adapters::config::read_profile_deletions(
+                &directory.join("deleted-profiles.json")
+            )
+            .unwrap()
+            .unwrap()
+            .iter()
+            .any(|deletion| deletion.id == profile.id)
+        );
     }
 
     #[test]
@@ -483,7 +529,8 @@ mod tests {
         std::fs::write(fixture.root.join("save.dat"), b"unsaved changes").unwrap();
         let profile = fixture.service.create("  Новый профиль  ").unwrap();
         assert_eq!(profile.name, "Новый профиль");
-        assert_eq!(profile.branch, "novyy-profil");
+        assert!(profile.branch.starts_with("novyy-profil-"));
+        assert!(profile.branch.ends_with(&profile.id.simple().to_string()));
         let repository = git2::Repository::open(&fixture.root).unwrap();
         let commit = repository
             .find_branch(&profile.branch, git2::BranchType::Local)
@@ -525,14 +572,46 @@ mod tests {
             branch: "test-3".into(),
             last_played_game: None,
         });
-        assert_eq!(fixture.service.create("Test").unwrap().branch, "test-4");
-        assert_eq!(fixture.service.create("Test").unwrap().branch, "test-5");
+        let first = fixture.service.create("Test").unwrap();
+        let second = fixture.service.create("Test").unwrap();
+        assert!(first.branch.starts_with("test-"));
+        assert!(second.branch.starts_with("test-"));
+        assert_ne!(first.branch, second.branch);
         crate::adapters::git::create_branch(&fixture.root, "savehub/catalog", &commit).unwrap();
-        assert_eq!(
-            fixture.service.create("SaveHub").unwrap().branch,
-            "savehub-2"
+        assert!(
+            fixture
+                .service
+                .create("SaveHub")
+                .unwrap()
+                .branch
+                .starts_with("savehub-")
         );
-        assert_eq!(fixture.service.create("🎮").unwrap().branch, "profile");
+        assert!(
+            fixture
+                .service
+                .create("🎮")
+                .unwrap()
+                .branch
+                .starts_with("profile-")
+        );
+    }
+
+    #[test]
+    fn recreating_a_deleted_profile_name_uses_a_different_branch() {
+        let fixture = Fixture::new();
+        fixture.service.runtime.set_running_games(Vec::new());
+
+        let deleted = fixture.service.create("Replay").unwrap();
+        fixture.service.delete(&deleted.id).unwrap();
+        let replacement = fixture.service.create("Replay").unwrap();
+
+        assert_ne!(replacement.id, deleted.id);
+        assert_ne!(replacement.branch, deleted.branch);
+        assert!(
+            replacement
+                .branch
+                .ends_with(&replacement.id.simple().to_string())
+        );
     }
 
     #[test]

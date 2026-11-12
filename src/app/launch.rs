@@ -54,7 +54,10 @@ impl Launches {
         {
             let mut current = self.status.lock().unwrap();
             if self.cancel_requested.load(Ordering::SeqCst)
-                && matches!(status.phase.as_str(), "preparing" | "awaitingProfile")
+                && matches!(
+                    status.phase.as_str(),
+                    "preparing" | "awaitingProfile" | "awaitingLocalLaunch"
+                )
             {
                 status.phase = "cancelled".into();
             }
@@ -102,9 +105,12 @@ async fn begin_internal(
         .operation
         .try_lock()
         .map_err(|_| ApiError::Rejected("Другой запуск уже подготавливается".into()))?;
-    if state.status().phase == "awaitingProfile" {
+    if matches!(
+        state.status().phase.as_str(),
+        "awaitingProfile" | "awaitingLocalLaunch"
+    ) {
         return Err(ApiError::Rejected(
-            "Сначала завершите или отмените выбор профиля".into(),
+            "Сначала завершите или отмените текущий запуск".into(),
         ));
     }
     state.cancel_requested.store(false, Ordering::SeqCst);
@@ -209,10 +215,49 @@ pub async fn confirm(
         }
     }
 }
+
+pub async fn confirm_local(
+    app: &tauri::AppHandle,
+    request_id: uuid::Uuid,
+) -> ApiResult<LaunchStatus> {
+    let state = app.state::<Launches>();
+    let _guard = state
+        .operation
+        .try_lock()
+        .map_err(|_| ApiError::Rejected("Запуск уже выполняется".into()))?;
+    let mut status = state.status();
+    if status.request_id != Some(request_id) || status.phase != "awaitingLocalLaunch" {
+        return Err(ApiError::Rejected(
+            "Запрос локального запуска уже изменился".into(),
+        ));
+    }
+    let profile_id = status
+        .active_profile_id
+        .ok_or_else(|| ApiError::Rejected("Нет активного профиля".into()))?;
+    match execute_with_policy(app, status.game_id.unwrap(), profile_id, true).await {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            status.phase = "awaitingLocalLaunch".into();
+            status.error = Some(error_message(&error));
+            state.publish(app, status);
+            Err(error)
+        }
+    }
+}
+
 async fn execute(
     app: &tauri::AppHandle,
     game_id: GameId,
     profile_id: ProfileId,
+) -> ApiResult<LaunchStatus> {
+    execute_with_policy(app, game_id, profile_id, false).await
+}
+
+async fn execute_with_policy(
+    app: &tauri::AppHandle,
+    game_id: GameId,
+    profile_id: ProfileId,
+    local_only: bool,
 ) -> ApiResult<LaunchStatus> {
     let state = app.state::<Launches>();
     if !state.starting(app) {
@@ -221,12 +266,17 @@ async fn execute(
     let workflow = app.state::<Arc<LaunchGame>>().inner().clone();
     let launch_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        workflow.execute_guarded(game_id, profile_id, || {
+        let proceed = || {
             !launch_app
                 .state::<Launches>()
                 .cancel_requested
                 .load(Ordering::SeqCst)
-        })
+        };
+        if local_only {
+            workflow.execute_guarded_locally(game_id, profile_id, proceed)
+        } else {
+            workflow.execute_guarded(game_id, profile_id, proceed)
+        }
     })
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -237,7 +287,25 @@ async fn execute(
     ] {
         let _ = app.emit(event, ());
     }
-    let pid = result?;
+    let pid = match result {
+        Ok(pid) => pid,
+        Err(crate::services::ServiceError::RemoteUnavailable(_)) if !local_only => {
+            let mut status = state.status();
+            status.phase = "awaitingLocalLaunch".into();
+            status.error = None;
+            status.warnings = vec![
+                "Не удалось связаться с репозиторием. Можно запустить игру с сохранениями на этом ПК."
+                    .into(),
+            ];
+            state.publish(app, status);
+            let status = state.status();
+            if status.phase == "awaitingLocalLaunch" && state.dialog_mode.load(Ordering::SeqCst) {
+                show_dialog(app)?;
+            }
+            return Ok(status);
+        }
+        Err(error) => return Err(error.into()),
+    };
     let state = app.state::<Launches>();
     let mut status = state.status();
     status.phase = "running".into();
@@ -300,7 +368,10 @@ pub fn cancel(app: &tauri::AppHandle, request_id: Option<uuid::Uuid>) -> ApiResu
         if request_id.is_some() && status.request_id != request_id {
             return Err(ApiError::Rejected("Запрос запуска уже изменился".into()));
         }
-        if matches!(status.phase.as_str(), "preparing" | "awaitingProfile") {
+        if matches!(
+            status.phase.as_str(),
+            "preparing" | "awaitingProfile" | "awaitingLocalLaunch"
+        ) {
             state.cancel_requested.store(true, Ordering::SeqCst);
             status.phase = "cancelled".into();
             status.error = None;

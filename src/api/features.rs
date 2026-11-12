@@ -16,7 +16,7 @@ pub struct AppFeatures {
 #[tauri::command]
 pub fn get_app_features() -> AppFeatures {
     AppFeatures {
-        sync: false,
+        sync: true,
         profile_switch: true,
         save_history: true,
         conflicts: true,

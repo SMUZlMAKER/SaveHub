@@ -104,6 +104,14 @@ pub async fn confirm_game_launch(
 }
 
 #[tauri::command]
+pub async fn confirm_local_game_launch(
+    app: tauri::AppHandle,
+    request_id: uuid::Uuid,
+) -> ApiResult<LaunchStatus> {
+    crate::app::launch::confirm_local(&app, request_id).await
+}
+
+#[tauri::command]
 pub async fn cancel_game_launch(app: tauri::AppHandle, request_id: uuid::Uuid) -> ApiResult<()> {
     crate::app::launch::cancel(&app, Some(request_id))
 }

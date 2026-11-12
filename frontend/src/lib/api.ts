@@ -80,6 +80,7 @@ export const api = {
   createGameShortcut: (gameId: string) => call<Shortcut>("create_game_shortcut", { gameId }),
   beginGameLaunch: (gameId: string) => call<LaunchStatus>("begin_game_launch", { gameId }),
   confirmGameLaunch: (requestId: string, profileId: string) => call<LaunchStatus>("confirm_game_launch", { requestId, profileId }),
+  confirmLocalGameLaunch: (requestId: string) => call<LaunchStatus>("confirm_local_game_launch", { requestId }),
   cancelGameLaunch: (requestId: string) => call<void>("cancel_game_launch", { requestId }),
   getAppPreferences: () => call<AppPreferences>("get_app_preferences"),
   saveAppPreferences: (preferences: AppPreferences) =>
@@ -126,8 +127,8 @@ export const api = {
     call<void>("switch_profile", { profileId }),
   createProfile: (name: string): Promise<Profile> =>
     call<Profile>("create_profile", { name }),
-  deleteProfile: (profileId: string) =>
-    call<void>("delete_profile", { profileId }),
+  deleteProfile: (profileId: string, confirmed: boolean) =>
+    call<void>("delete_profile", { profileId, confirmed }),
 
   // src/api/saves.rs
   listSaves: (game: string) => call<Save[]>("list_saves", { game }),
@@ -158,6 +159,7 @@ export const api = {
   getSettings: () => call<Settings>("get_settings"),
   updateSettings: (settings: Settings) =>
     call<void>("update_settings", { settings }),
+  connectRepository: () => call<void>("connect_repository"),
   setGithubToken: (token: string) => call<void>("set_github_token", { token }),
 };
 

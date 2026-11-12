@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::domain::ProfileId;
 use crate::services::{
-    ServiceResult, game::GameService, process::ProcessService, profile::ProfileService,
+    ServiceResult, game::GameService, process::ProcessMonitor, profile::ProfileService,
     repo::RepoService, save::SaveService,
 };
 
@@ -11,7 +11,7 @@ pub struct SwitchProfile {
     profiles: Arc<ProfileService>,
     saves: Arc<SaveService>,
     repo: Arc<RepoService>,
-    processes: Arc<ProcessService>,
+    processes: Arc<dyn ProcessMonitor>,
     operations: Arc<Mutex<()>>,
 }
 
@@ -22,7 +22,7 @@ impl SwitchProfile {
         profiles: Arc<ProfileService>,
         saves: Arc<SaveService>,
         repo: Arc<RepoService>,
-        processes: Arc<ProcessService>,
+        processes: Arc<dyn ProcessMonitor>,
         operations: Arc<Mutex<()>>,
     ) -> Self {
         Self {
@@ -87,9 +87,6 @@ impl SwitchProfile {
         }
         self.repo
             .checkpoint(&current.id.to_string(), "SaveHub: before profile switch")?;
-        if current.id == *profile_id {
-            return Ok(());
-        }
         if self.repo.configuration().is_some() {
             self.repo.fetch()?;
             if !self
@@ -101,6 +98,9 @@ impl SwitchProfile {
                     "Разрешите конфликты целевого профиля".into(),
                 ));
             }
+        }
+        if current.id == *profile_id {
+            return Ok(());
         }
         self.repo.checkout_profile(&profile_id.to_string())?;
         for game in &games {
@@ -126,6 +126,45 @@ impl SwitchProfile {
         }
         Ok(())
     }
+
+    /// Refresh the active profile before launching another game without changing it.
+    pub fn refresh_active_profile(&self) -> ServiceResult<()> {
+        if !self.repo.has_local_repository() {
+            return Ok(());
+        }
+        let _guard = self.operations.lock().map_err(|_| {
+            crate::services::ServiceError::Conflict("Операция уже выполняется".into())
+        })?;
+        self.processes.refresh_running_games()?;
+        let running = self
+            .processes
+            .running_games()
+            .ok_or(crate::services::ServiceError::ProcessesUnknown)?;
+        if !running.is_empty() {
+            return Err(crate::services::ServiceError::GameRunning(running));
+        }
+        let profile = self.profiles.active()?.ok_or_else(|| {
+            crate::services::ServiceError::InvalidInput("Нет активного профиля".into())
+        })?;
+        self.repo.checkout_profile(&profile.id.to_string())?;
+        self.repo
+            .checkpoint(&profile.id.to_string(), "SaveHub: before game launch")?;
+        if self.repo.configuration().is_some() {
+            self.repo.fetch().map_err(|error| {
+                crate::services::ServiceError::RemoteUnavailable(format!("{error:?}"))
+            })?;
+            if !self
+                .repo
+                .apply_profile_updates(&profile.id.to_string())?
+                .is_empty()
+            {
+                return Err(crate::services::ServiceError::Conflict(
+                    "Разрешите конфликты сохранений перед запуском игры".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +175,20 @@ mod tests {
         domain::*,
     };
     use std::{collections::HashMap, path::PathBuf};
+
+    struct IdleProcessMonitor(Arc<RuntimeState>);
+
+    impl crate::services::process::ProcessMonitor for IdleProcessMonitor {
+        fn refresh_running_games(&self) -> crate::services::ServiceResult<Vec<GameProcessEvent>> {
+            self.0.set_running_games(Vec::new());
+            Ok(Vec::new())
+        }
+
+        fn running_games(&self) -> Option<Vec<GameId>> {
+            self.0.running_games()
+        }
+    }
+
     struct Fixture {
         dir: PathBuf,
         source: PathBuf,
@@ -242,7 +295,7 @@ mod tests {
                     settings.clone(),
                 )),
                 repo,
-                Arc::new(ProcessService::new(catalog, runtime.clone(), settings)),
+                Arc::new(IdleProcessMonitor(runtime.clone())),
                 operations,
             );
             Self {
@@ -302,6 +355,18 @@ mod tests {
         ));
         assert!(fs::read_symlink(&f.source).unwrap().is_none());
         assert_eq!(f.runtime.active_profile(), Some(f.old));
+    }
+
+    #[test]
+    fn refreshing_active_profile_preserves_it_after_process_refresh() {
+        let f = Fixture::new();
+        f.workflow.refresh_active_profile().unwrap();
+        assert_eq!(f.runtime.active_profile(), Some(f.old));
+        assert_eq!(fs::read(&f.source.join("save")).unwrap(), b"old profile");
+
+        f.runtime.invalidate_process_state();
+        f.workflow.refresh_active_profile().unwrap();
+        assert!(f.runtime.running_games().unwrap().is_empty());
     }
 
     #[test]

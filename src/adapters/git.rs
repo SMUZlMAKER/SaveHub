@@ -23,6 +23,13 @@ pub enum MergeOutcome {
     Diverged,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictCommit {
+    pub id: CommitId,
+    pub committed_at: u64,
+    pub summary: String,
+}
+
 fn invalid(message: &str) -> AdapterError {
     AdapterError::InvalidData(message.into())
 }
@@ -98,6 +105,54 @@ pub fn validate_repository_root(path: &Path) -> AdapterResult<()> {
         return Err(invalid(
             "Выберите корень существующего локального Git-репозитория сохранений",
         ));
+    }
+    Ok(())
+}
+
+/// Validate a repository path, optionally initializing a new local repository.
+pub fn prepare_repository_root(path: &Path, initialize_if_missing: bool) -> AdapterResult<()> {
+    if path.components().any(|component| {
+        matches!(component, Component::Normal(name) if name.to_string_lossy().eq_ignore_ascii_case(".git"))
+    }) {
+        return Err(invalid(
+            "Выберите корень существующего локального Git-репозитория сохранений",
+        ));
+    }
+
+    let path = path.canonicalize()?;
+    if !path.is_dir() {
+        return Err(invalid("Укажите путь к существующей папке"));
+    }
+
+    match Repository::open_ext(
+        &path,
+        git2::RepositoryOpenFlags::NO_SEARCH,
+        std::iter::empty::<&Path>(),
+    ) {
+        Ok(_) => return validate_repository_root(&path),
+        Err(error) if error.code() == ErrorCode::NotFound => (),
+        Err(error) => return Err(error.into()),
+    }
+
+    for ancestor in path.ancestors().skip(1) {
+        match Repository::open_ext(
+            ancestor,
+            git2::RepositoryOpenFlags::NO_SEARCH,
+            std::iter::empty::<&Path>(),
+        ) {
+            Ok(_) => {
+                return Err(invalid(
+                    "Выберите корень существующего локального Git-репозитория сохранений",
+                ));
+            }
+            Err(error) if error.code() == ErrorCode::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    if initialize_if_missing {
+        Repository::init(&path)?;
+        validate_repository_root(&path)?;
     }
     Ok(())
 }
@@ -298,6 +353,79 @@ pub fn merge_head(repo: &Path) -> AdapterResult<CommitId> {
     head.ok_or_else(|| invalid("No merge in progress"))
 }
 
+fn conflict_commit(repo: &Repository, id: git2::Oid) -> AdapterResult<ConflictCommit> {
+    let commit = repo.find_commit(id)?;
+    Ok(ConflictCommit {
+        id: id.to_string(),
+        committed_at: commit.time().seconds().max(0) as u64 * 1000,
+        summary: commit
+            .message()
+            .unwrap_or_default()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    })
+}
+
+pub fn merge_commits(repo: &Path) -> AdapterResult<(ConflictCommit, ConflictCommit)> {
+    let repository = Repository::open(repo)?;
+    if repository.state() != RepositoryState::Merge {
+        return Err(invalid("No merge in progress"));
+    }
+    let local = repository.head()?.peel_to_commit()?.id();
+    let remote = git2::Oid::from_str(&merge_head(repo)?)?;
+    Ok((
+        conflict_commit(&repository, local)?,
+        conflict_commit(&repository, remote)?,
+    ))
+}
+
+/// Create a merge commit whose tree is the locally selected version.
+pub fn create_local_resolution_commit(repo: &Path, remote: &str) -> AdapterResult<CommitId> {
+    let repository = Repository::open(repo)?;
+    if repository.state() != RepositoryState::Merge {
+        return Err(invalid("No merge in progress"));
+    }
+    let local = repository.head()?.peel_to_commit()?;
+    let remote = repository.find_commit(git2::Oid::from_str(remote)?)?;
+    let tree = local.tree()?;
+    let signature = signature(&repository)?;
+    Ok(repository
+        .commit(
+            None,
+            &signature,
+            &signature,
+            "Resolve profile conflict using local version",
+            &tree,
+            &[&local, &remote],
+        )?
+        .to_string())
+}
+
+/// Replace the in-progress merge with the selected commit.
+pub fn select_merge_commit(
+    repo: &Path,
+    remote: bool,
+    local_resolution: Option<&str>,
+) -> AdapterResult<CommitId> {
+    let repository = Repository::open(repo)?;
+    if repository.state() != RepositoryState::Merge {
+        return Err(invalid("No merge in progress"));
+    }
+    let id = if let Some(resolution) = local_resolution {
+        git2::Oid::from_str(resolution)?
+    } else if remote {
+        git2::Oid::from_str(&merge_head(repo)?)?
+    } else {
+        repository.head()?.peel_to_commit()?.id()
+    };
+    let commit = repository.find_commit(id)?;
+    repository.reset(commit.as_object(), git2::ResetType::Hard, None)?;
+    repository.cleanup_state()?;
+    Ok(id.to_string())
+}
+
 pub fn conflict_sizes(repo: &Path, path: &Path) -> AdapterResult<(u64, u64)> {
     relative(path)?;
     let repo = Repository::open(repo)?;
@@ -443,6 +571,173 @@ pub fn push(repo: &Path, remote: &str, refspec: &str, token: &str) -> AdapterRes
     Ok(())
 }
 
+/// Delete one remote branch through the normal receive-pack update protocol.
+pub fn delete_remote_branch(
+    repo: &Path,
+    remote: &str,
+    branch: &str,
+    token: &str,
+) -> AdapterResult<()> {
+    let reference = format!("refs/heads/{branch}");
+    if !git2::Reference::is_valid_name(&reference) {
+        return Err(invalid("Invalid branch"));
+    }
+    push(repo, remote, &format!(":{reference}"), token)
+}
+
+pub fn delete_remote_tracking_branch(repo: &Path, branch: &str) -> AdapterResult<()> {
+    let reference = format!("refs/remotes/origin/{branch}");
+    if !git2::Reference::is_valid_name(&reference) {
+        return Err(invalid("Invalid branch"));
+    }
+    let repository = Repository::open(repo)?;
+    match repository.find_reference(&reference) {
+        Ok(mut tracking) => tracking.delete()?,
+        Err(error) if error.code() == ErrorCode::NotFound => (),
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+pub fn push_with_lease(
+    repo: &Path,
+    remote: &str,
+    branch: &str,
+    expected_remote: &str,
+    commit: &str,
+    token: &str,
+) -> AdapterResult<()> {
+    push_with_lease_before_update(repo, remote, branch, expected_remote, commit, token, || {
+        Ok(())
+    })
+}
+
+fn push_with_lease_before_update(
+    repo: &Path,
+    remote: &str,
+    branch: &str,
+    expected_remote: &str,
+    commit: &str,
+    token: &str,
+    before_update: impl FnOnce() -> AdapterResult<()>,
+) -> AdapterResult<()> {
+    let reference = format!("refs/heads/{branch}");
+    if !git2::Reference::is_valid_name(&reference) {
+        return Err(invalid("Invalid branch"));
+    }
+    let expected_remote = git2::Oid::from_str(expected_remote)?;
+    let commit = git2::Oid::from_str(commit)?;
+    let remote_url = Repository::open(repo)?
+        .find_remote(remote)?
+        .url()?
+        .to_owned();
+    let mut before_update = Some(before_update);
+    let remote_path = Path::new(&remote_url);
+    if Repository::open_bare(remote_path).is_ok() {
+        return push_to_local_bare_with_lease(
+            repo,
+            remote,
+            remote_path,
+            &reference,
+            expected_remote,
+            commit,
+            token,
+            before_update.take().expect("Lease check runs once"),
+        );
+    }
+    let mut rejected = false;
+    let expected_reference = reference.clone();
+    let mut callbacks = callbacks(token);
+    callbacks.push_negotiation(move |updates| {
+        if updates.len() != 1
+            || updates[0].dst_refname()? != expected_reference
+            || updates[0].src() != expected_remote
+        {
+            return Err(git2::Error::from_str(
+                "Remote branch changed since conflict resolution was reviewed",
+            ));
+        }
+        before_update.take().expect("Push negotiation runs once")()
+            .map_err(|error| git2::Error::from_str(&format!("{error:?}")))?;
+        Ok(())
+    });
+    callbacks.push_update_reference(|_, error| {
+        rejected |= error.is_some();
+        Ok(())
+    });
+    let mut options = git2::PushOptions::new();
+    options.remote_callbacks(callbacks);
+    Repository::open(repo)?
+        .find_remote(remote)?
+        .push(&[format!("{commit}:{reference}")], Some(&mut options))?;
+    drop(options);
+    if rejected {
+        return Err(AdapterError::Git("Remote rejected leased push".into()));
+    }
+    Ok(())
+}
+
+fn push_to_local_bare_with_lease(
+    repo: &Path,
+    remote: &str,
+    bare: &Path,
+    reference: &str,
+    expected_remote: git2::Oid,
+    commit: git2::Oid,
+    token: &str,
+    before_update: impl FnOnce() -> AdapterResult<()>,
+) -> AdapterResult<()> {
+    let destination = Repository::open_bare(bare)?;
+    let temporary = format!("refs/savehub/push-staging/{}", uuid::Uuid::new_v4());
+    if let Err(error) = push(repo, remote, &format!("{commit}:{temporary}"), token) {
+        return match remove_temporary_ref(&destination, &temporary) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(AdapterError::Git(format!(
+                "Push failed: {error:?}; staging ref cleanup failed: {cleanup:?}"
+            ))),
+        };
+    }
+
+    let update = (|| {
+        before_update()?;
+        let mut transaction = destination.transaction()?;
+        transaction.lock_ref(reference)?;
+        let actual = match destination.find_reference(reference) {
+            Ok(reference) => reference.target(),
+            Err(error) if error.code() == ErrorCode::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if actual != Some(expected_remote) {
+            return Err(AdapterError::Git(
+                "Remote branch changed since conflict resolution was reviewed".into(),
+            ));
+        }
+        if commit != expected_remote && !destination.graph_descendant_of(commit, expected_remote)? {
+            return Err(AdapterError::Git(
+                "Resolution commit is not based on the expected remote version".into(),
+            ));
+        }
+        transaction.set_target(reference, commit, None, "SaveHub: resolve profile conflict")?;
+        transaction.commit()?;
+        Ok(())
+    })();
+
+    let cleanup = remove_temporary_ref(&destination, &temporary);
+    match (update, cleanup) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn remove_temporary_ref(repo: &Repository, reference: &str) -> AdapterResult<()> {
+    match repo.find_reference(reference) {
+        Ok(mut reference) => reference.delete().map_err(AdapterError::from),
+        Err(error) if error.code() == ErrorCode::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub fn list_branches(repo: &Path) -> AdapterResult<Vec<String>> {
     let repo = Repository::open(repo)?;
     let mut names = Vec::new();
@@ -534,16 +829,22 @@ pub fn archive_profile_branch(
     let expected = repo.commondir().join("savehub/trees").join(key);
     let common = repo.commondir().canonicalize()?;
     let mut local = match repo.find_branch(branch, BranchType::Local) {
-        Ok(local) => local,
-        Err(error) if error.code() == ErrorCode::NotFound => {
-            if fs::exists(&expected)? {
-                return Err(invalid("Profile worktree exists without its branch"));
-            }
-            return Ok(None);
-        }
+        Ok(local) => Some(local),
+        Err(error) if error.code() == ErrorCode::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    if local.is_head() {
+    let remote_tracking = match repo.find_reference(&format!("refs/remotes/origin/{branch}")) {
+        Ok(remote) => Some(remote),
+        Err(error) if error.code() == ErrorCode::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if local.is_none() && remote_tracking.is_none() {
+        if fs::exists(&expected)? {
+            return Err(invalid("Profile worktree exists without its branch"));
+        }
+        return Ok(None);
+    }
+    if local.as_ref().is_some_and(git2::Branch::is_head) {
         return Err(invalid("Cannot remove the main working tree branch"));
     }
     let reference = format!("refs/heads/{branch}");
@@ -594,7 +895,14 @@ pub fn archive_profile_branch(
         return Err(invalid("Archive path escapes repository metadata"));
     }
     fs::write_atomic(&archive.join("branch"), branch.as_bytes())?;
-    let tip = local.get().peel_to_commit()?.id();
+    let tip = match local.as_ref() {
+        Some(local) => local.get().peel_to_commit()?.id(),
+        None => remote_tracking
+            .as_ref()
+            .ok_or_else(|| invalid("Missing profile branch"))?
+            .peel_to_commit()?
+            .id(),
+    };
     repo.reference(
         &format!("refs/savehub/deleted-profiles/{archive_id}"),
         tip,
@@ -616,7 +924,9 @@ pub fn archive_profile_branch(
         }
     }
     // Unmerged independent histories may be removed because an archive ref pins the tip.
-    local.delete()?;
+    if let Some(local) = local.as_mut() {
+        local.delete()?;
+    }
     Ok(Some(archive))
 }
 fn clean(repo: &Repository) -> AdapterResult<()> {
@@ -1503,6 +1813,56 @@ mod tests {
     }
 
     #[test]
+    fn archiving_remote_only_profile_branch_pins_its_history_and_removes_tracking_ref() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo("root");
+        let bare = sandbox.0.join("remote.git");
+        Repository::init_bare(&bare).unwrap();
+        let commit = commit_files(&root, None, &[], "profile history").unwrap();
+        create_branch(&root, "profiles/remote-only", &commit).unwrap();
+        set_remote(&root, "origin", bare.to_str().unwrap()).unwrap();
+        push(
+            &root,
+            "origin",
+            "refs/heads/profiles/remote-only:refs/heads/profiles/remote-only",
+            "",
+        )
+        .unwrap();
+
+        let local = sandbox.repo("local");
+        set_remote(&local, "origin", bare.to_str().unwrap()).unwrap();
+        fetch(&local, "origin", "").unwrap();
+        assert!(
+            remote_head(&local, "profiles/remote-only")
+                .unwrap()
+                .is_some()
+        );
+
+        archive_profile_branch(&local, "profiles/remote-only", "profile-id").unwrap();
+
+        let repo = Repository::open(&local).unwrap();
+        assert!(
+            repo.find_reference("refs/remotes/origin/profiles/remote-only")
+                .is_ok()
+        );
+        delete_remote_tracking_branch(&local, "profiles/remote-only").unwrap();
+        assert!(
+            repo.find_reference("refs/remotes/origin/profiles/remote-only")
+                .is_err()
+        );
+        assert!(
+            repo.references()
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|reference| {
+                    reference
+                        .name()
+                        .is_ok_and(|name| name.starts_with("refs/savehub/deleted-profiles/"))
+                })
+        );
+    }
+
+    #[test]
     fn local_clone_fetch_push_and_remote_rejection() {
         let sandbox = Sandbox::new();
         let source = sandbox.repo("source");
@@ -1536,6 +1896,87 @@ mod tests {
                 .url()
                 .unwrap(),
             source.to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn leased_push_rejects_a_remote_advance_during_negotiation() {
+        let sandbox = Sandbox::new();
+        let source = sandbox.repo("source");
+        let initial_commit = initial(&source);
+        let bare = sandbox.0.join("bare.git");
+        Repository::init_bare(&bare).unwrap();
+        set_remote(&source, "origin", bare.to_str().unwrap()).unwrap();
+        push(&source, "origin", "refs/heads/base:refs/heads/base", "").unwrap();
+
+        let local_commit = save(&source, "local.dat", b"local");
+        let remote_commit = commit_files(
+            &source,
+            Some(&initial_commit),
+            &[("remote.dat", b"remote")],
+            "Competing remote update",
+        )
+        .unwrap();
+        push(
+            &source,
+            "origin",
+            &format!("{remote_commit}:refs/heads/competitor"),
+            "",
+        )
+        .unwrap();
+        Repository::open(&source)
+            .unwrap()
+            .reference(
+                "refs/heads/base",
+                git2::Oid::from_str(&local_commit).unwrap(),
+                true,
+                "local conflict resolution",
+            )
+            .unwrap();
+
+        let remote_ref = format!("refs/heads/base");
+        let result = push_with_lease_before_update(
+            &source,
+            "origin",
+            "base",
+            &initial_commit,
+            &local_commit,
+            "",
+            || {
+                Repository::open_bare(&bare)
+                    .unwrap()
+                    .reference(
+                        &remote_ref,
+                        git2::Oid::from_str(&remote_commit).unwrap(),
+                        true,
+                        "concurrent writer",
+                    )
+                    .map(|_| ())
+                    .map_err(AdapterError::from)
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            Repository::open_bare(&bare)
+                .unwrap()
+                .find_reference("refs/heads/base")
+                .unwrap()
+                .target()
+                .unwrap()
+                .to_string(),
+            remote_commit
+        );
+        assert!(
+            Repository::open_bare(&bare)
+                .unwrap()
+                .references()
+                .unwrap()
+                .all(|reference| !reference
+                    .unwrap()
+                    .name()
+                    .unwrap()
+                    .starts_with("refs/savehub/push-staging/"))
         );
     }
 }

@@ -46,8 +46,6 @@ pub struct SaveConflictDto {
 pub enum SaveConflictResolution {
     KeepLocal,
     KeepRemote,
-    KeepBothLocalFirst,
-    KeepBothRemoteFirst,
 }
 
 /// GET /saves/{game}
@@ -144,12 +142,6 @@ pub async fn resolve_save_conflict(
     let resolution = match resolution {
         SaveConflictResolution::KeepLocal => crate::domain::ConflictResolution::KeepLocal,
         SaveConflictResolution::KeepRemote => crate::domain::ConflictResolution::KeepRemote,
-        SaveConflictResolution::KeepBothLocalFirst => {
-            crate::domain::ConflictResolution::KeepBothLocalFirst
-        }
-        SaveConflictResolution::KeepBothRemoteFirst => {
-            crate::domain::ConflictResolution::KeepBothRemoteFirst
-        }
     };
     super::sync::resolve(
         app,

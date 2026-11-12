@@ -36,6 +36,8 @@ struct FakeRepo {
     fetch_finished: Mutex<Option<Instant>>,
     unpublished_profiles: Mutex<std::collections::BTreeSet<ProfileId>>,
     fail_discovery: AtomicBool,
+    disable_auto_push: AtomicBool,
+    allow_push_while_gaming: AtomicBool,
 }
 
 struct CheckpointBlock {
@@ -74,6 +76,13 @@ impl FakeRepo {
 }
 
 impl RepoOperations for FakeRepo {
+    fn sync_preferences(&self) -> (bool, bool) {
+        (
+            !self.disable_auto_push.load(Ordering::SeqCst),
+            self.allow_push_while_gaming.load(Ordering::SeqCst),
+        )
+    }
+
     fn unpushed_profiles(&self) -> ServiceResult<Vec<ProfileId>> {
         if self.fail_discovery.load(Ordering::SeqCst) {
             return Err(ServiceError::Conflict("cannot inspect profile refs".into()));
@@ -114,6 +123,10 @@ impl RepoOperations for FakeRepo {
 
     fn has_unpushed_commits(&self, _profile: &ProfileId) -> ServiceResult<bool> {
         Ok(!self.clean.load(Ordering::SeqCst))
+    }
+
+    fn apply_profile_updates(&self, _profile: &ProfileId) -> ServiceResult<bool> {
+        Ok(false)
     }
 
     fn push(&self, profile: &ProfileId) -> ServiceResult<()> {
@@ -214,15 +227,48 @@ fn unknown_or_running_processes_block_checkpoint_but_allow_fetch() {
     ));
     assert_eq!(repo.take_calls(), ["fetch"]);
     _runtime.set_running_games(vec![uuid::Uuid::new_v4()]);
-    assert!(matches!(
-        engine.tick(engine.next_deadline(), false),
-        Err(ServiceError::GameRunning(_))
-    ));
-    assert!(repo.take_calls().is_empty());
+    engine.tick(engine.next_deadline(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["fetch"]);
 
     _runtime.set_running_games(Vec::new());
     engine.tick(engine.next_deadline(), false).unwrap();
     assert_eq!(repo.take_calls(), ["checkpoint:a", "push:a"]);
+}
+
+#[test]
+fn automatic_push_respects_after_session_and_while_gaming_preferences() {
+    let repo = Arc::new(FakeRepo::default());
+    repo.disable_auto_push.store(true, Ordering::SeqCst);
+    repo.unpublished_profiles.lock().unwrap().insert(PROFILE_A);
+    let (mut engine, runtime, _) = engine(repo.clone());
+    engine.tick(Instant::now(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "fetch"]);
+
+    engine.force_sync = true;
+    engine.tick(engine.next_deadline(), false).unwrap();
+    assert_eq!(repo.take_calls(), ["push:a"]);
+
+    repo.disable_auto_push.store(true, Ordering::SeqCst);
+    repo.unpublished_profiles.lock().unwrap().insert(PROFILE_A);
+    let now = Instant::now();
+    engine.schedule_requests(
+        &Requests {
+            wake: true,
+            ..Requests::default()
+        },
+        now,
+    );
+    engine.tick(now, false).unwrap();
+    assert_eq!(repo.take_calls(), ["checkpoint:a", "fetch"]);
+
+    repo.disable_auto_push.store(false, Ordering::SeqCst);
+    runtime.set_running_games(vec![uuid::Uuid::new_v4()]);
+    engine.tick(now + Duration::from_secs(301), false).unwrap();
+    assert_eq!(repo.take_calls(), ["fetch"]);
+
+    repo.allow_push_while_gaming.store(true, Ordering::SeqCst);
+    engine.tick(now + Duration::from_secs(302), false).unwrap();
+    assert_eq!(repo.take_calls(), ["push:a"]);
 }
 
 #[test]

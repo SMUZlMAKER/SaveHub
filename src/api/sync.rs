@@ -51,8 +51,10 @@ pub fn get_sync_status(
 }
 
 #[tauri::command]
-pub fn sync_now(app: tauri::AppHandle) -> ApiResult<()> {
-    crate::app::actions::sync_now(&app)
+pub async fn sync_now(app: tauri::AppHandle) -> ApiResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::app::actions::sync_now(&app))
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?
 }
 
 #[derive(Debug, Serialize)]
@@ -61,10 +63,26 @@ pub struct ConflictDto {
     pub id: String,
     pub game_id: String,
     pub game_name: String,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub profile_branch: String,
+    pub file_path: String,
     /// Версия на этом ПК.
     pub local: SaveVersionDto,
-    /// Версия из репозитория (с другого ПК).
+    /// Версия, полученная из origin.
     pub remote: SaveVersionDto,
+    /// Коммит локальной стороны конфликта.
+    pub local_commit: ConflictCommitDto,
+    /// Коммит стороны, полученной из origin.
+    pub remote_commit: ConflictCommitDto,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictCommitDto {
+    pub id: String,
+    pub committed_at: u64,
+    pub summary: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,10 +99,6 @@ pub struct SaveVersionDto {
 pub enum ConflictResolution {
     KeepLocal,
     KeepRemote,
-    /// Оставить локальную версию; обе версии сохраняются адаптером Git перед разрешением.
-    KeepBothLocalFirst,
-    /// Сохранить обе версии; основной становится версия из репозитория.
-    KeepBothRemoteFirst,
 }
 
 impl From<ConflictResolution> for crate::domain::ConflictResolution {
@@ -92,8 +106,6 @@ impl From<ConflictResolution> for crate::domain::ConflictResolution {
         match value {
             ConflictResolution::KeepLocal => Self::KeepLocal,
             ConflictResolution::KeepRemote => Self::KeepRemote,
-            ConflictResolution::KeepBothLocalFirst => Self::KeepBothLocalFirst,
-            ConflictResolution::KeepBothRemoteFirst => Self::KeepBothRemoteFirst,
         }
     }
 }
@@ -112,26 +124,55 @@ pub async fn list_conflicts(
             .lock()
             .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
         let games = catalog.games();
+        let profiles = catalog.profiles();
         Ok(repo
             .list_conflicts()?
             .into_iter()
-            .map(|c| ConflictDto {
-                id: c.id,
-                game_id: c.game_id.to_string(),
-                game_name: games
-                    .get(&c.game_id)
-                    .map(|g| g.name.clone())
-                    .unwrap_or_else(|| c.game_id.to_string()),
-                local: SaveVersionDto {
-                    machine_name: c.local.machine_id,
-                    modified_at: c.local.modified_at,
-                    size_bytes: c.local.size_bytes,
-                },
-                remote: SaveVersionDto {
-                    machine_name: c.remote.machine_id,
-                    modified_at: c.remote.modified_at,
-                    size_bytes: c.remote.size_bytes,
-                },
+            .map(|c| {
+                let profile = profiles.get(&c.profile_id);
+                let game_root = std::path::Path::new("games").join(c.game_id.to_string());
+                let file_path = c
+                    .file_path
+                    .strip_prefix(&game_root)
+                    .unwrap_or(&c.file_path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                ConflictDto {
+                    id: c.id,
+                    game_id: c.game_id.to_string(),
+                    game_name: games
+                        .get(&c.game_id)
+                        .map(|g| g.name.clone())
+                        .unwrap_or_else(|| c.game_id.to_string()),
+                    profile_id: c.profile_id.to_string(),
+                    profile_name: profile
+                        .map(|profile| profile.name.clone())
+                        .unwrap_or_else(|| c.profile_id.to_string()),
+                    profile_branch: profile
+                        .map(|profile| profile.branch.clone())
+                        .unwrap_or_else(|| "неизвестна".into()),
+                    file_path,
+                    local: SaveVersionDto {
+                        machine_name: c.local.machine_id,
+                        modified_at: c.local.modified_at,
+                        size_bytes: c.local.size_bytes,
+                    },
+                    remote: SaveVersionDto {
+                        machine_name: c.remote.machine_id,
+                        modified_at: c.remote.modified_at,
+                        size_bytes: c.remote.size_bytes,
+                    },
+                    local_commit: ConflictCommitDto {
+                        id: c.local_commit.id,
+                        committed_at: c.local_commit.committed_at,
+                        summary: c.local_commit.summary,
+                    },
+                    remote_commit: ConflictCommitDto {
+                        id: c.remote_commit.id,
+                        committed_at: c.remote_commit.committed_at,
+                        summary: c.remote_commit.summary,
+                    },
+                }
             })
             .collect())
     })
@@ -174,14 +215,14 @@ pub(super) async fn resolve(
             .lock()
             .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
         processes.refresh_running_games()?;
-        if let Some(game) = game {
-            if !repo
-                .list_conflicts()?
-                .iter()
-                .any(|c| c.id == id && c.game_id == game)
-            {
-                return Err(ApiError::Rejected("Конфликт не принадлежит игре".into()));
-            }
+        let conflicts = repo.list_conflicts()?;
+        let conflict = conflicts
+            .iter()
+            .find(|conflict| conflict.id == id && game.is_none_or(|game| conflict.game_id == game));
+        if conflict.is_none() {
+            return Err(ApiError::Rejected(
+                "Конфликт не найден или не принадлежит игре".into(),
+            ));
         }
         repo.resolve_conflict(&id, resolution)?;
         Ok(())
@@ -189,6 +230,7 @@ pub(super) async fn resolve(
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
     for event in [
+        super::events::SYNC_STATUS_CHANGED,
         super::events::CONFLICTS_CHANGED,
         super::events::SAVES_CHANGED,
     ] {

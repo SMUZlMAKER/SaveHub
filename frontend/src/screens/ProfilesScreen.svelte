@@ -45,9 +45,13 @@
 
   async function remove(profile: Profile) {
     if (mutating || switchingTo) return
+    const confirmed = window.confirm(
+      `Удалить профиль «${profile.name}» и его локальную ветку? Если репозиторий настроен, ветка на GitHub и вся её история будут удалены при следующей успешной синхронизации.`,
+    )
+    if (!confirmed) return
     mutating = true
     try {
-      await api.deleteProfile(profile.id)
+      await api.deleteProfile(profile.id, true)
       await load()
     } catch (e) {
       notice.error(e)

@@ -117,6 +117,14 @@ pub fn write_profiles(path: &Path, profiles: &[Profile]) -> AdapterResult<()> {
     write_json(path, profiles)
 }
 
+pub fn read_profile_deletions(path: &Path) -> AdapterResult<Option<Vec<ProfileDeletion>>> {
+    read_json(path)
+}
+
+pub fn write_profile_deletions(path: &Path, deletions: &[ProfileDeletion]) -> AdapterResult<()> {
+    write_json(path, deletions)
+}
+
 pub fn read_settings(path: &Path) -> AdapterResult<Option<SettingsData>> {
     read_json(path)
 }

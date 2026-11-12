@@ -75,7 +75,22 @@ impl SyncRepository {
         !self.pending_push.is_empty()
     }
 
-    pub(crate) fn execute(&mut self, mut request: SyncRequest) -> ServiceResult<SyncAttempt> {
+    pub fn can_checkpoint(&self) -> bool {
+        self.runtime
+            .running_games()
+            .is_none_or(|games| games.is_empty())
+    }
+
+    pub fn auto_push_allowed(&self) -> bool {
+        let (after_session, while_gaming) = self.repo.sync_preferences();
+        match self.runtime.running_games() {
+            Some(games) if !games.is_empty() => while_gaming,
+            Some(_) => after_session,
+            None => false,
+        }
+    }
+
+    pub(crate) fn execute(&mut self, request: SyncRequest) -> ServiceResult<SyncAttempt> {
         if !request.checkpoint && !request.push && !request.fetch {
             return Ok(SyncAttempt::Completed(SyncOutcome::default()));
         }
@@ -103,7 +118,6 @@ impl SyncRepository {
                 last_sync_at: None,
                 error: None,
             });
-            request.push = true;
         }
 
         if self.repository.is_none() {
@@ -150,8 +164,10 @@ impl SyncRepository {
             }
         }
 
+        let auto_checkpoint_push =
+            matches!(outcome.checkpoint, Some(Ok(true))) && self.repo.sync_preferences().0;
         if outcome.push.is_none()
-            && (request.push || matches!(outcome.checkpoint, Some(Ok(true))))
+            && (request.push || auto_checkpoint_push)
             && self.has_pending_push()
         {
             let result = self.push_pending_profiles();

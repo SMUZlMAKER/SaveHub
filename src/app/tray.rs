@@ -195,25 +195,17 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         }
     }
 }
-// Подписываемся до запроса: ошибка фоновой операции не должна потеряться после
-// успешной постановки в очередь. Автоматические проверки не создают диалогов.
+// Manual sync runs off the UI thread and returns its actual result to the tray.
 fn sync_from_tray(app: &AppHandle) {
-    let mut changes = app.state::<Arc<RuntimeState>>().subscribe_sync_status();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = super::actions::sync_now(&app) {
+        let action_app = app.clone();
+        let result =
+            tauri::async_runtime::spawn_blocking(move || super::actions::sync_now(&action_app))
+                .await
+                .unwrap_or_else(|error| Err(ApiError::Internal(error.to_string())));
+        if let Err(error) = result {
             show_error(&app, error);
-            return;
-        }
-        while changes.changed().await.is_ok() {
-            match app.state::<Arc<RuntimeState>>().sync_status().state {
-                SyncState::Error => {
-                    show_error(&app, ApiError::Rejected("Не удалось синхронизировать репозиторий. Проверьте подключение к сети и настройки доступа к GitHub.".into()));
-                    break;
-                }
-                SyncState::Idle | SyncState::NotConfigured => break,
-                SyncState::Syncing => {}
-            }
         }
         refresh_sync_status(&app);
     });
