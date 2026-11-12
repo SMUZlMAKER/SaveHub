@@ -56,9 +56,7 @@ export interface SaveConflict {
 
 export type SaveConflictResolution =
   | "keepLocal"
-  | "keepRemote"
-  | "keepBothLocalFirst"
-  | "keepBothRemoteFirst";
+  | "keepRemote";
 
 export type SaveKind =
   | "beforeSwitch"
@@ -71,6 +69,7 @@ export interface SaveHistoryEntry {
   id: string;
   gameId: string;
   gameName: string;
+  profileId: string;
   profileName: string;
   kind: SaveKind;
   /** Unix-время, мс */
@@ -98,15 +97,26 @@ export interface Conflict {
   id: string;
   gameId: string;
   gameName: string;
+  profileId: string;
+  profileName: string;
+  profileBranch: string;
+  filePath: string;
   local: SaveVersion;
   remote: SaveVersion;
+  localCommit: ConflictCommit;
+  remoteCommit: ConflictCommit;
+}
+
+export interface ConflictCommit {
+  id: string;
+  /** Unix-время коммита, мс */
+  committedAt: number;
+  summary: string;
 }
 
 export type ConflictResolution =
   | "keepLocal"
-  | "keepRemote"
-  | "keepBothLocalFirst"
-  | "keepBothRemoteFirst";
+  | "keepRemote";
 
 export interface Settings {
   catalogRepoUrl: string | null;
@@ -115,7 +125,6 @@ export interface Settings {
   hasGithubToken: boolean;
   syncAfterSession: boolean;
   syncWhileGaming: boolean;
-  autoSwitchProfile: boolean;
   askProfileBeforeLaunch: boolean;
 }
 

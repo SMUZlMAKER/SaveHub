@@ -23,6 +23,13 @@ pub enum MergeOutcome {
     Diverged,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictCommit {
+    pub id: CommitId,
+    pub committed_at: u64,
+    pub summary: String,
+}
+
 fn invalid(message: &str) -> AdapterError {
     AdapterError::InvalidData(message.into())
 }
@@ -98,6 +105,54 @@ pub fn validate_repository_root(path: &Path) -> AdapterResult<()> {
         return Err(invalid(
             "Выберите корень существующего локального Git-репозитория сохранений",
         ));
+    }
+    Ok(())
+}
+
+/// Validate a repository path, optionally initializing a new local repository.
+pub fn prepare_repository_root(path: &Path, initialize_if_missing: bool) -> AdapterResult<()> {
+    if path.components().any(|component| {
+        matches!(component, Component::Normal(name) if name.to_string_lossy().eq_ignore_ascii_case(".git"))
+    }) {
+        return Err(invalid(
+            "Выберите корень существующего локального Git-репозитория сохранений",
+        ));
+    }
+
+    let path = path.canonicalize()?;
+    if !path.is_dir() {
+        return Err(invalid("Укажите путь к существующей папке"));
+    }
+
+    match Repository::open_ext(
+        &path,
+        git2::RepositoryOpenFlags::NO_SEARCH,
+        std::iter::empty::<&Path>(),
+    ) {
+        Ok(_) => return validate_repository_root(&path),
+        Err(error) if error.code() == ErrorCode::NotFound => (),
+        Err(error) => return Err(error.into()),
+    }
+
+    for ancestor in path.ancestors().skip(1) {
+        match Repository::open_ext(
+            ancestor,
+            git2::RepositoryOpenFlags::NO_SEARCH,
+            std::iter::empty::<&Path>(),
+        ) {
+            Ok(_) => {
+                return Err(invalid(
+                    "Выберите корень существующего локального Git-репозитория сохранений",
+                ));
+            }
+            Err(error) if error.code() == ErrorCode::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    if initialize_if_missing {
+        Repository::init(&path)?;
+        validate_repository_root(&path)?;
     }
     Ok(())
 }
@@ -296,6 +351,51 @@ pub fn merge_head(repo: &Path) -> AdapterResult<CommitId> {
         false
     })?;
     head.ok_or_else(|| invalid("No merge in progress"))
+}
+
+fn conflict_commit(repo: &Repository, id: git2::Oid) -> AdapterResult<ConflictCommit> {
+    let commit = repo.find_commit(id)?;
+    Ok(ConflictCommit {
+        id: id.to_string(),
+        committed_at: commit.time().seconds().max(0) as u64 * 1000,
+        summary: commit
+            .message()
+            .unwrap_or_default()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    })
+}
+
+pub fn merge_commits(repo: &Path) -> AdapterResult<(ConflictCommit, ConflictCommit)> {
+    let repository = Repository::open(repo)?;
+    if repository.state() != RepositoryState::Merge {
+        return Err(invalid("No merge in progress"));
+    }
+    let local = repository.head()?.peel_to_commit()?.id();
+    let remote = git2::Oid::from_str(&merge_head(repo)?)?;
+    Ok((
+        conflict_commit(&repository, local)?,
+        conflict_commit(&repository, remote)?,
+    ))
+}
+
+/// Replace the in-progress merge with one of its original commits.
+pub fn select_merge_commit(repo: &Path, remote: bool) -> AdapterResult<CommitId> {
+    let repository = Repository::open(repo)?;
+    if repository.state() != RepositoryState::Merge {
+        return Err(invalid("No merge in progress"));
+    }
+    let id = if remote {
+        git2::Oid::from_str(&merge_head(repo)?)?
+    } else {
+        repository.head()?.peel_to_commit()?.id()
+    };
+    let commit = repository.find_commit(id)?;
+    repository.reset(commit.as_object(), git2::ResetType::Hard, None)?;
+    repository.cleanup_state()?;
+    Ok(id.to_string())
 }
 
 pub fn conflict_sizes(repo: &Path, path: &Path) -> AdapterResult<(u64, u64)> {

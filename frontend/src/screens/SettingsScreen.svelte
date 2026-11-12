@@ -11,6 +11,9 @@
   let savingToken = $state(false)
   let saveError = $state('')
   let tokenError = $state('')
+  let connectError = $state('')
+  let connecting = $state(false)
+  let pickingRepo = $state(false)
 
   let settings = $state<Settings | null>(null)
   let loading = $state(true)
@@ -18,12 +21,11 @@
   let token = $state('')
 
   const syncToggles: { key: 'syncAfterSession' | 'syncWhileGaming'; title: string; hint: string }[] = [
-    { key: 'syncAfterSession', title: 'Отправлять сохранения в GitHub после выхода из игры', hint: 'Изменённые сохранения текущего профиля на этом ПК → репозиторий сохранений' },
-    { key: 'syncWhileGaming', title: 'Отправлять сохранения в GitHub во время игры', hint: 'Изменённые сохранения текущего профиля на этом ПК → репозиторий. Запись файлов игрой может мешать отправке.' },
+    { key: 'syncAfterSession', title: 'Автоматически отправлять сохранения, когда игры закрыты', hint: 'После фиксации контрольной точки изменения текущего профиля отправляются в репозиторий' },
+    { key: 'syncWhileGaming', title: 'Отправлять готовые коммиты во время игры', hint: 'Пока игра запущена, SaveHub не фиксирует меняющиеся файлы. Можно отправить более ранние контрольные точки; изменения текущей игры попадут после её закрытия.' },
   ]
-  const launchToggles: { key: 'askProfileBeforeLaunch' | 'autoSwitchProfile'; title: string; hint: string }[] = [
+  const launchToggles: { key: 'askProfileBeforeLaunch'; title: string; hint: string }[] = [
     { key: 'askProfileBeforeLaunch', title: 'Выбирать профиль перед запуском игры', hint: 'Показывать диалог выбора, если профилей больше одного' },
-    { key: 'autoSwitchProfile', title: 'Выбирать профиль последнего игрока', hint: 'Запланированное автоматическое переключение сохранений; сейчас недоступно' },
   ]
 
   async function load() {
@@ -64,6 +66,30 @@
     } finally { savingToken = false }
   }
 
+  async function pickRepo() {
+    pickingRepo = true
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({ title: 'Выберите локальный репозиторий сохранений', multiple: false, directory: true })
+      if (typeof selected === 'string') settings!.localRepoPath = selected
+    } catch (e) {
+      connectError = describeError(e)
+    } finally { pickingRepo = false }
+  }
+
+  async function connectRepository() {
+    if (connecting || saving || savingToken || !settings) return
+    connecting = true
+    connectError = ''
+    try {
+      await api.updateSettings(settings)
+      await api.connectRepository()
+      notice.show('Репозиторий сохранений подключён')
+    } catch (e) {
+      connectError = describeError(e)
+    } finally { connecting = false }
+  }
+
   onMount(load)
 </script>
 
@@ -84,11 +110,15 @@
       </label>
       <label class="field">
         <span class="muted">Локальная копия репозитория</span>
-        <!-- TODO(frontend): добавить кнопку «Обзор…» для выбора папки через системный диалог Проводника. -->
-        <input bind:value={settings.localRepoPath} />
+        <div class="inline-form"><input class="grow" bind:value={settings.localRepoPath} /><button type="button" onclick={pickRepo} disabled={pickingRepo || saving || savingToken}>{pickingRepo ? 'Выбор…' : 'Обзор…'}</button></div>
       </label>
 
-      <p class="muted">Укажите абсолютный путь к уже созданному Git-репозиторию. Автоматическое клонирование пока недоступно; для локальных профилей адрес GitHub необязателен.</p>
+      <p class="muted">Укажите абсолютный путь к существующей папке. Для GitHub пустая папка используется для клона, существующие файлы не заменяются. Без GitHub SaveHub автоматически создаст Git-репозиторий в выбранной папке, если его там ещё нет.</p>
+      {#if features.sync && settings.repoUrl?.trim() && settings.localRepoPath?.trim()}
+        <div class="actions"><button type="button" onclick={connectRepository} disabled={connecting || saving || savingToken || !settings.hasGithubToken}>{connecting ? 'Подключаем…' : 'Подключить репозиторий GitHub'}</button></div>
+        {#if !settings.hasGithubToken}<p class="muted">Сначала сохраните токен GitHub ниже.</p>{/if}
+      {/if}
+      {#if connectError}<p class="error" role="alert">{connectError}</p>{/if}
 
       <h3>Список игр</h3>
       <label class="field">
@@ -98,17 +128,18 @@
       <p class="muted">Создайте пустой репозиторий без README. Список обновляется автоматически; без подключения он хранится на этом ПК.</p>
 
       <h3>Передача сохранений между ПК</h3>
-      <p class="muted">Полная синхронизация между ПК пока недоступна. Фоновая отправка уже использует сохранённые параметры для настроенного локального репозитория.</p>
+      <p class="muted">SaveHub автоматически отправляет контрольные точки и получает изменения из GitHub. Полученные сохранения применяются к профилю перед запуском игры; синхронизация сама по себе не перезаписывает файлы работающей игры.</p>
+      <p class="muted">Кнопка «Синхронизировать» выполняет полный обмен для всех профилей: сохраняет локальные изменения, получает и объединяет изменения из GitHub, затем отправляет результат. Она недоступна, пока игра запущена; при конфликте сначала выберите, какие версии оставить.</p>
       <ul class="list settings-list">
         {#each syncToggles as toggle (toggle.key)}
           <li class="row"><label class="grow toggle"><span><span>{toggle.title}</span><span class="muted block">{toggle.hint}</span></span><input type="checkbox" bind:checked={settings[toggle.key]} disabled={!features.sync} /></label></li>
         {/each}
       </ul>
-      <p class="muted">Проверка и получение более свежих сохранений из GitHub перед запуском игры пока недоступны. Отдельной работающей настройки для этого ещё нет.</p>
+      <p class="muted">При запуске игры через SaveHub, пока она ещё остановлена, локальные изменения фиксируются, затем приложение получает и применяет удалённые изменения. Если данные изменились на обоих ПК, сначала разрешите конфликт.</p>
       <h3>Профиль при запуске игры</h3>
       <ul class="list settings-list">
         {#each launchToggles as toggle (toggle.key)}
-          <li class="row"><label class="grow toggle"><span><span>{toggle.title}</span><span class="muted block">{toggle.hint}</span></span><input type="checkbox" bind:checked={settings[toggle.key]} disabled={toggle.key === 'autoSwitchProfile'} /></label></li>
+          <li class="row"><label class="grow toggle"><span><span>{toggle.title}</span><span class="muted block">{toggle.hint}</span></span><input type="checkbox" bind:checked={settings[toggle.key]} /></label></li>
         {/each}
       </ul>
 
@@ -128,7 +159,7 @@
       <button disabled={!token.trim() || saving || savingToken}>{savingToken ? 'Сохраняем…' : 'Сохранить токен'}</button>
     </form>
     {#if tokenError}<p class="error" role="alert">{tokenError}</p>{/if}
-    <p class="muted">Сохранение токена не подтверждает доступ к репозиторию.</p>
+    <p class="muted">{settings.repoUrl?.trim() ? 'Сохраните параметры репозитория и нажмите «Подключить репозиторий GitHub», чтобы проверить доступ и клонировать локальную копию.' : 'Адрес GitHub необязателен: без него профили и сохранения работают только локально.'}</p>
   {/if}
 </Loadable>
 

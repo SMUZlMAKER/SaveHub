@@ -80,6 +80,7 @@ pub fn start() {
             api::sync::resolve_conflict,
             api::settings::get_settings,
             api::settings::update_settings,
+            api::settings::connect_repository,
             api::settings::set_github_token,
             api::updates::get_app_preferences,
             api::updates::save_app_preferences,
@@ -229,6 +230,13 @@ pub fn start() {
                 )
                 .with_saves(saves.clone(), switch.clone(), operations.clone()),
             ));
+            app.manage(Arc::new(crate::workflows::manual_sync::ManualSync::new(
+                repo_service.clone(),
+                catalog.clone(),
+                runtime.clone(),
+                process_service.clone(),
+                operations.clone(),
+            )));
             app.manage(switch);
             app.manage(saves);
             app.manage(process_service);

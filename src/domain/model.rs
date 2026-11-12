@@ -72,21 +72,28 @@ pub struct SaveVersion {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConflictCommit {
+    pub id: String,
+    pub committed_at: u64,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conflict {
     pub id: ConflictId,
     pub game_id: GameId,
     pub profile_id: ProfileId,
+    pub file_path: PathBuf,
     pub local: SaveVersion,
     pub remote: SaveVersion,
+    pub local_commit: ConflictCommit,
+    pub remote_commit: ConflictCommit,
 }
 
 #[derive(Debug, Clone)]
 pub enum ConflictResolution {
     KeepLocal,
     KeepRemote,
-    KeepBothLocalFirst,
-    KeepBothRemoteFirst,
-    CreateProfile { name: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

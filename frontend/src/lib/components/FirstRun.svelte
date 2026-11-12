@@ -9,9 +9,10 @@
   let settings = $state<Settings | null>(null)
   let loading = $state(true)
   let error = $state('')
-  const repositorySet = $derived(!!settings?.localRepoPath?.trim() && (!features.sync || !!settings?.repoUrl?.trim()))
+  const repositorySet = $derived(!!settings?.localRepoPath?.trim())
+  const remoteConfigured = $derived(!!settings?.repoUrl?.trim())
   const hasGames = $derived(!gamesLoading && !gamesError && gamesCount > 0)
-  const complete = $derived(repositorySet && (!features.sync || settings?.hasGithubToken) && hasGames)
+  const complete = $derived(repositorySet && (!remoteConfigured || settings?.hasGithubToken) && hasGames)
 
   async function load() {
     loading = true; error = ''
@@ -31,11 +32,11 @@
     <button onclick={load}>Повторить</button>
   {:else}
     <ol>
-      <li><div class="grow"><strong>Репозиторий сохранений</strong><span class="muted block">{repositorySet ? 'Параметры репозитория указаны' : features.sync ? 'Укажите адрес GitHub и папку на этом компьютере' : 'Укажите уже созданный локальный Git-репозиторий сохранений; автоматическое клонирование пока недоступно'}</span></div><button onclick={onsettings}>{repositorySet ? 'Изменить' : 'Настроить'}</button></li>
-      {#if features.sync}<li><div class="grow"><strong>Доступ к GitHub</strong><span class="muted block">{settings?.hasGithubToken ? 'Токен сохранён; доступ к репозиторию ещё не подтверждён' : 'Сохраните токен в настройках'}</span></div><button onclick={onsettings}>{settings?.hasGithubToken ? 'Настройки' : 'Указать токен'}</button></li>{/if}
+      <li><div class="grow"><strong>Репозиторий сохранений</strong><span class="muted block">{repositorySet ? 'Локальный Git-репозиторий указан' : 'Для GitHub укажите папку для клона; без GitHub выберите существующий локальный репозиторий'}</span></div><button onclick={onsettings}>{repositorySet ? 'Изменить' : 'Настроить'}</button></li>
+      {#if features.sync && remoteConfigured}<li><div class="grow"><strong>Доступ к GitHub</strong><span class="muted block">{settings?.hasGithubToken ? 'Токен сохранён; доступ к репозиторию ещё не подтверждён' : 'Сохраните токен в настройках'}</span></div><button onclick={onsettings}>{settings?.hasGithubToken ? 'Настройки' : 'Указать токен'}</button></li>{/if}
       <li><div class="grow"><strong>Первая игра</strong><span class="muted block">{gamesLoading ? 'Проверяем список игр…' : gamesError ? 'Список игр не удалось загрузить' : hasGames ? 'Игра добавлена в список' : 'Выберите exe и папку сохранений'}</span></div><button disabled={gamesLoading || !!gamesError || adding} onclick={onadd}>{hasGames ? 'Добавить ещё' : 'Добавить игру'}</button></li>
     </ol>
-    <p class="muted">{features.sync ? 'Заполнение параметров не подтверждает подключение. Результат синхронизации появится вверху окна.' : 'Полная синхронизация между ПК пока недоступна. С локальным Git-репозиторием можно переключать профили и восстанавливать сохранения.'}</p>
+    <p class="muted">После настройки репозитория подключите его и проверьте состояние синхронизации вверху окна.</p>
   {/if}
 </section>
 

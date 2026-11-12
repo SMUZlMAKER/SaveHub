@@ -50,6 +50,9 @@ pub fn spawn(app: tauri::AppHandle) {
             };
             match update {
                 Ok(changes) => {
+                    let session_ended = changes
+                        .iter()
+                        .any(|event| matches!(event, GameProcessEvent::Stopped(_)));
                     if publish_poll_state(previous_poll, true) {
                         let _ = app.emit(events::GAMES_CHANGED, ());
                         app.state::<Launches>().monitor_status(&app, None);
@@ -83,16 +86,20 @@ pub fn spawn(app: tauri::AppHandle) {
                             launches.mark_stopped(&app, id);
                         }
                     }
-                    if saves_changed
-                        || changes
-                            .iter()
-                            .any(|event| matches!(event, GameProcessEvent::Stopped(_)))
-                    {
+                    if saves_changed || session_ended {
                         let _ = app.emit(events::SAVES_CHANGED, ());
                         if let Some(worker) =
                             app.try_state::<crate::background::repo::RepoWorkerHandle>()
                         {
-                            let _ = worker.wake();
+                            let sync_after_session = app
+                                .state::<Arc<crate::domain::Settings>>()
+                                .data()
+                                .sync_after_session;
+                            if session_ended && sync_after_session {
+                                let _ = worker.sync_now();
+                            } else {
+                                let _ = worker.wake();
+                            }
                         }
                     }
                     for event in changes {

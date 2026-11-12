@@ -1,7 +1,7 @@
 //! Общие действия окна и трея. Не имитировать успех неподключённых сценариев.
 use crate::{
     api::{ApiError, ApiResult},
-    domain::{ProfileId, RuntimeState, SyncState},
+    domain::ProfileId,
 };
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -49,22 +49,26 @@ pub fn switch_profile(app: &tauri::AppHandle, profile_id: ProfileId) -> ApiResul
 }
 
 pub fn sync_now(app: &tauri::AppHandle) -> ApiResult<()> {
-    match app.state::<Arc<RuntimeState>>().sync_status().state {
-        SyncState::NotConfigured => {
-            return Err(ApiError::Rejected(
-                "Сначала настройте репозиторий сохранений и доступ к GitHub в настройках.".into(),
-            ));
-        }
-        SyncState::Syncing => {
-            return Err(ApiError::Rejected(
-                "Синхронизация уже выполняется. Дождитесь её завершения.".into(),
-            ));
-        }
-        _ => {}
+    let result = app
+        .state::<Arc<crate::workflows::manual_sync::ManualSync>>()
+        .execute()
+        .map_err(|error| match error {
+            crate::services::ServiceError::GameRunning(_) => {
+                ApiError::Rejected("Закройте все игры перед синхронизацией.".into())
+            }
+            crate::services::ServiceError::ProcessesUnknown => ApiError::Rejected(
+                "Не удалось проверить запущенные игры. Синхронизация отменена.".into(),
+            ),
+            other => other.into(),
+        });
+    for event in [
+        crate::api::events::SYNC_STATUS_CHANGED,
+        crate::api::events::CONFLICTS_CHANGED,
+        crate::api::events::SAVES_CHANGED,
+    ] {
+        let _ = app.emit(event, ());
     }
-    app.state::<crate::background::repo::RepoWorkerHandle>()
-        .sync_now()
-        .map_err(Into::into)
+    result
 }
 
 #[cfg(test)]

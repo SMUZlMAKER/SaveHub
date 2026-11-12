@@ -73,6 +73,8 @@ impl LaunchGame {
                 ServiceError::Conflict("Переключение сохранений не настроено".into())
             })?;
             switch.execute(&profile_id)?;
+        } else if let Some(switch) = &self.switch {
+            switch.refresh_active_profile()?;
         }
         let _guard = self
             .operations

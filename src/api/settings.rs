@@ -21,8 +21,6 @@ pub struct SettingsDto {
     pub has_github_token: bool,
     pub sync_after_session: bool,
     pub sync_while_gaming: bool,
-    /// Переключать профиль на того, кто последним запускал игру.
-    pub auto_switch_profile: bool,
     pub ask_profile_before_launch: bool,
 }
 
@@ -38,7 +36,6 @@ pub fn get_settings(service: State<'_, Arc<SettingsService>>) -> ApiResult<Setti
         has_github_token: service.has_github_token()?,
         sync_after_session: data.sync_after_session,
         sync_while_gaming: data.sync_while_gaming,
-        auto_switch_profile: data.auto_switch_profile,
         ask_profile_before_launch: data.ask_profile_before_launch,
     })
 }
@@ -63,7 +60,6 @@ pub async fn update_settings(
             data.local_repo_path = settings.local_repo_path.map(std::path::PathBuf::from);
             data.sync_after_session = settings.sync_after_session;
             data.sync_while_gaming = settings.sync_while_gaming;
-            data.auto_switch_profile = settings.auto_switch_profile;
             data.ask_profile_before_launch = settings.ask_profile_before_launch;
         })
     })
@@ -75,6 +71,25 @@ pub async fn update_settings(
         crate::app::catalog::notify_status(&app);
         catalog_worker.request_sync();
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn connect_repository(
+    repo: State<'_, Arc<crate::services::repo::RepoService>>,
+    worker: State<'_, RepoWorkerHandle>,
+    operations: State<'_, Arc<std::sync::Mutex<()>>>,
+) -> ApiResult<()> {
+    let (repo, operations) = (repo.inner().clone(), operations.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operations.lock().map_err(|_| {
+            crate::services::ServiceError::Conflict("Блокировка операций повреждена".into())
+        })?;
+        repo.connect()
+    })
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))??;
+    worker.wake()?;
     Ok(())
 }
 

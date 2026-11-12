@@ -263,6 +263,13 @@ impl RepoService {
         Some(RepositoryConfig { url, path })
     }
 
+    pub fn has_local_repository(&self) -> bool {
+        self.settings
+            .data()
+            .local_repo_path
+            .is_some_and(|path| !path.as_os_str().is_empty())
+    }
+
     fn lock(&self) -> ServiceResult<std::sync::MutexGuard<'_, ()>> {
         self.operations
             .lock()
@@ -557,7 +564,23 @@ impl RepoService {
     }
     fn conflicts_for(&self, profile: &Profile, path: &Path) -> ServiceResult<Vec<Conflict>> {
         let mut conflicts = Vec::new();
-        for file in git::conflict_paths(path).map_err(ServiceError::Adapter)? {
+        let files = git::conflict_paths(path).map_err(ServiceError::Adapter)?;
+        if files.is_empty() {
+            return Ok(conflicts);
+        }
+        let (local_commit, remote_commit) =
+            git::merge_commits(path).map_err(ServiceError::Adapter)?;
+        let local_commit = ConflictCommit {
+            id: local_commit.id,
+            committed_at: local_commit.committed_at,
+            summary: local_commit.summary,
+        };
+        let remote_commit = ConflictCommit {
+            id: remote_commit.id,
+            committed_at: remote_commit.committed_at,
+            summary: remote_commit.summary,
+        };
+        for file in files {
             let game_id = file
                 .components()
                 .filter_map(|c| c.as_os_str().to_str())
@@ -580,16 +603,19 @@ impl RepoService {
                 id,
                 game_id,
                 profile_id: profile.id,
+                file_path: file.clone(),
                 local: SaveVersion {
-                    machine_id: self.settings.local().machine_id,
+                    machine_id: "local".into(),
                     modified_at: 0,
                     size_bytes: local_size,
                 },
                 remote: SaveVersion {
-                    machine_id: "remote".into(),
+                    machine_id: "origin".into(),
                     modified_at: 0,
                     size_bytes: remote_size,
                 },
+                local_commit: local_commit.clone(),
+                remote_commit: remote_commit.clone(),
             };
             self.runtime.add_conflict(conflict.clone());
             conflicts.push(conflict);
@@ -614,74 +640,79 @@ impl RepoService {
         conflict_id: &str,
         resolution: ConflictResolution,
     ) -> ServiceResult<()> {
+        self.resolve_conflict_with_publisher(
+            conflict_id,
+            resolution,
+            |profile, path, expected_remote| {
+                let branch = profile.branch.clone();
+                let expected_remote = expected_remote.to_owned();
+                self.network(|root, token| {
+                    git::fetch(root, "origin", token).map_err(ServiceError::Adapter)?;
+                    let fetched_remote =
+                        git::remote_head(root, &branch).map_err(ServiceError::Adapter)?;
+                    if fetched_remote.as_deref() != Some(expected_remote.as_str()) {
+                        Self::refresh_conflicted_worktree(path, root, &branch)?;
+                        return Err(ServiceError::Conflict(
+                            "Удалённый профиль изменился во время разрешения. Конфликты обновлены; проверьте новую пару коммитов."
+                                .into(),
+                        ));
+                    }
+                    git::push(
+                        root,
+                        "origin",
+                        &format!("+refs/heads/{0}:refs/heads/{0}", branch),
+                        token,
+                    )
+                    .map_err(ServiceError::Adapter)
+                })
+            },
+        )
+    }
+
+    fn refresh_conflicted_worktree(path: &Path, root: &Path, branch: &str) -> ServiceResult<()> {
+        git::abort_merge(path).map_err(ServiceError::Adapter)?;
+        if let Some(remote) = git::remote_head(root, branch).map_err(ServiceError::Adapter)? {
+            git::backup_worktree(path).map_err(ServiceError::Adapter)?;
+            match git::merge(path, &remote, false).map_err(ServiceError::Adapter)? {
+                git::MergeOutcome::Diverged => {
+                    return Err(ServiceError::Conflict("История профиля разошлась".into()));
+                }
+                git::MergeOutcome::UpToDate
+                | git::MergeOutcome::Merged(_)
+                | git::MergeOutcome::Conflicts(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_conflict_with_publisher(
+        &self,
+        conflict_id: &str,
+        resolution: ConflictResolution,
+        publish_local: impl FnOnce(&Profile, &Path, &str) -> ServiceResult<()>,
+    ) -> ServiceResult<()> {
         let _guard = self.lock()?;
         self.stopped()?;
         let key: ConflictKey = serde_json::from_str(conflict_id)
             .map_err(|_| ServiceError::InvalidInput("Неверный ID конфликта".into()))?;
         let profile = self.profile(&key.profile.to_string())?;
         let path = self.tree(&profile)?;
-        if !git::conflict_paths(&path)
-            .map_err(ServiceError::Adapter)?
-            .contains(&key.path)
-        {
+        let paths = git::conflict_paths(&path).map_err(ServiceError::Adapter)?;
+        if !paths.contains(&key.path) {
             return Err(ServiceError::NotFound("Конфликт не найден".into()));
         }
+        let (_, remote_commit) = git::merge_commits(&path).map_err(ServiceError::Adapter)?;
         git::backup_worktree(&path).map_err(ServiceError::Adapter)?;
-        git::backup_conflict(&path, &key.path).map_err(ServiceError::Adapter)?;
-        let remote_first = matches!(
-            resolution,
-            ConflictResolution::KeepRemote | ConflictResolution::KeepBothRemoteFirst
-        );
-        if let ConflictResolution::CreateProfile { name } = &resolution {
-            if name.trim().is_empty() {
-                return Err(ServiceError::InvalidInput("Пустое имя профиля".into()));
-            }
-            let id = uuid::Uuid::new_v4();
-            let branch = format!("profiles/{id}");
-            let (root, _) = self.repository()?;
-            let remote = git::merge_head(&path).map_err(ServiceError::Adapter)?;
-            git::create_branch(&root, &branch, &remote).map_err(ServiceError::Adapter)?;
-            let new_profile = Profile {
-                id,
-                name: name.trim().into(),
-                branch,
-                last_played_game: None,
-            };
-            if let Some(directory) = &self.persistence {
-                let mut profiles: Vec<_> = self.catalog.profiles().into_values().collect();
-                profiles.push(new_profile.clone());
-                if let Err(error) =
-                    config::write_profiles(&directory.join("profiles.json"), &profiles)
-                {
-                    git::archive_profile_branch(&root, &new_profile.branch, &id.to_string())
-                        .map_err(|rollback| {
-                            ServiceError::Conflict(format!(
-                                "Запись профиля: {error:?}; удаление новой ветки: {rollback:?}"
-                            ))
-                        })?;
-                    return Err(ServiceError::Adapter(error));
-                }
-            }
-            self.catalog.add_profile(new_profile);
-            // The new branch preserves the complete remote profile; the original keeps local files.
+        let keep_remote = matches!(&resolution, ConflictResolution::KeepRemote);
+        if !keep_remote {
+            publish_local(&profile, &path, &remote_commit.id)?;
         }
-        if remote_first {
-            git::accept_theirs(&path, &key.path)
-        } else {
-            git::accept_ours(&path, &key.path)
-        }
-        .map_err(ServiceError::Adapter)?;
-        if git::conflict_paths(&path)
-            .map_err(ServiceError::Adapter)?
-            .is_empty()
-        {
-            git::commit(&path, "Resolve save conflicts").map_err(ServiceError::Adapter)?;
-        }
+        git::select_merge_commit(&path, keep_remote).map_err(ServiceError::Adapter)?;
         self.runtime.replace_conflicts(
             self.runtime
                 .conflicts()
                 .into_iter()
-                .filter(|c| c.id != conflict_id)
+                .filter(|conflict| conflict.profile_id != profile.id)
                 .collect(),
         );
         Ok(())
@@ -887,6 +918,15 @@ mod tests {
         fn save_path(&self) -> PathBuf {
             PathBuf::from(format!("games/{}/save.dat", self.game.id))
         }
+        fn second_save_path(&self) -> PathBuf {
+            PathBuf::from(format!("games/{}/slot2.dat", self.game.id))
+        }
+        fn local_only_path(&self) -> PathBuf {
+            PathBuf::from(format!("games/{}/local-only.dat", self.game.id))
+        }
+        fn remote_only_path(&self) -> PathBuf {
+            PathBuf::from(format!("games/{}/remote-only.dat", self.game.id))
+        }
         fn save(&self, value: &[u8]) {
             fs::write_atomic(&self.tree().join(self.save_path()), value).unwrap();
             self.service
@@ -897,6 +937,10 @@ mod tests {
             self.service.runtime.set_running_games(Vec::new());
             self.save(b"original\n");
             let path = self.tree();
+            fs::write_atomic(&path.join(self.second_save_path()), b"base second\n").unwrap();
+            self.service
+                .checkpoint(&self.profile.id.to_string(), "base second save")
+                .unwrap();
             let other = self.dir.join("other");
             git::create_worktree(
                 &self.root,
@@ -906,7 +950,17 @@ mod tests {
             )
             .unwrap();
             self.save(b"local\n");
+            fs::write_atomic(&path.join(self.second_save_path()), b"local second\n").unwrap();
+            self.service
+                .checkpoint(&self.profile.id.to_string(), "local second save")
+                .unwrap();
+            fs::write_atomic(&path.join(self.local_only_path()), b"local only\n").unwrap();
+            self.service
+                .checkpoint(&self.profile.id.to_string(), "local-only save")
+                .unwrap();
             fs::write_atomic(&other.join(self.save_path()), b"remote\n").unwrap();
+            fs::write_atomic(&other.join(self.second_save_path()), b"remote second\n").unwrap();
+            fs::write_atomic(&other.join(self.remote_only_path()), b"remote only\n").unwrap();
             RepoService::commit_changes(&other, "remote edit").unwrap();
             git::push(
                 &self.root,
@@ -1069,13 +1123,21 @@ mod tests {
     }
 
     #[test]
-    fn conflicts_survive_restart_and_preserve_both_versions() {
+    fn resolving_conflicts_selects_one_entire_profile_commit() {
         for remote_first in [false, true] {
             let fixture = Fixture::new();
             let conflicts = fixture.conflict();
-            assert_eq!(conflicts.len(), 1);
+            assert_eq!(conflicts.len(), 2);
             assert_eq!(conflicts[0].game_id, fixture.game.id);
-            assert_eq!(fixture.service.list_conflicts().unwrap().len(), 1);
+            assert_eq!(conflicts[0].local.machine_id, "local");
+            assert_eq!(conflicts[0].remote.machine_id, "origin");
+            assert!(conflicts.iter().all(|conflict| {
+                conflict.local_commit.id == conflicts[0].local_commit.id
+                    && conflict.remote_commit.id == conflicts[0].remote_commit.id
+                    && conflict.local_commit.committed_at > 0
+                    && conflict.remote_commit.committed_at > 0
+            }));
+            assert_eq!(fixture.service.list_conflicts().unwrap().len(), 2);
             assert!(
                 fixture
                     .service
@@ -1083,15 +1145,41 @@ mod tests {
                     .is_err()
             );
             let resolution = if remote_first {
-                ConflictResolution::KeepBothRemoteFirst
+                ConflictResolution::KeepRemote
             } else {
-                ConflictResolution::KeepBothLocalFirst
+                ConflictResolution::KeepLocal
             };
+            let root = fixture.root.clone();
             fixture
                 .service
-                .resolve_conflict(&conflicts[0].id, resolution)
+                .resolve_conflict_with_publisher(
+                    &conflicts[0].id,
+                    resolution,
+                    |profile, _, expected_remote| {
+                        if remote_first {
+                            return Ok(());
+                        }
+                        assert_eq!(
+                            git::remote_head(&root, &profile.branch).unwrap().as_deref(),
+                            Some(expected_remote)
+                        );
+                        git::push(
+                            &root,
+                            "origin",
+                            &format!("+refs/heads/{0}:refs/heads/{0}", profile.branch),
+                            "",
+                        )
+                        .map_err(ServiceError::Adapter)
+                    },
+                )
                 .unwrap();
             assert!(fixture.service.list_conflicts().unwrap().is_empty());
+            let expected_commit = if remote_first {
+                &conflicts[0].remote_commit.id
+            } else {
+                &conflicts[0].local_commit.id
+            };
+            assert_eq!(git::head(&fixture.tree()).unwrap(), *expected_commit);
             assert_eq!(
                 fs::read(&fixture.tree().join(fixture.save_path())).unwrap(),
                 if remote_first {
@@ -1100,92 +1188,99 @@ mod tests {
                     b"local\n".as_slice()
                 }
             );
-            let repository = git2::Repository::open(fixture.tree()).unwrap();
             assert_eq!(
-                repository
-                    .head()
-                    .unwrap()
-                    .peel_to_commit()
-                    .unwrap()
-                    .parent_count(),
-                2
+                fs::read(&fixture.tree().join(fixture.second_save_path())).unwrap(),
+                if remote_first {
+                    b"remote second\n".as_slice()
+                } else {
+                    b"local second\n".as_slice()
+                }
             );
-            let backups: Vec<_> =
-                std::fs::read_dir(repository.path().join("savehub-conflict-versions"))
-                    .unwrap()
-                    .map(|e| e.unwrap().path())
-                    .collect();
+            assert_eq!(
+                fs::read(&fixture.tree().join(if remote_first {
+                    fixture.remote_only_path()
+                } else {
+                    fixture.local_only_path()
+                }))
+                .unwrap(),
+                if remote_first {
+                    b"remote only\n".as_slice()
+                } else {
+                    b"local only\n".as_slice()
+                }
+            );
             assert!(
-                backups
-                    .iter()
-                    .any(|p| fs::read(&p.join("local")).unwrap() == b"local\n"
-                        && fs::read(&p.join("remote")).unwrap() == b"remote\n")
+                !fixture
+                    .tree()
+                    .join(if remote_first {
+                        fixture.local_only_path()
+                    } else {
+                        fixture.remote_only_path()
+                    })
+                    .exists()
+            );
+            let repository = git2::Repository::open(fixture.tree()).unwrap();
+            assert_eq!(repository.state(), git2::RepositoryState::Clean);
+            let remote = git2::Repository::open_bare(&fixture.remote).unwrap();
+            assert_eq!(
+                remote
+                    .find_reference(&format!("refs/heads/{}", fixture.profile.branch))
+                    .unwrap()
+                    .target()
+                    .unwrap()
+                    .to_string(),
+                *expected_commit
+            );
+            assert!(
+                std::fs::read_dir(repository.path().join("savehub-backups"))
+                    .unwrap()
+                    .next()
+                    .is_some()
             );
         }
     }
 
     #[test]
-    fn conflict_can_create_an_independent_remote_profile() {
-        let mut fixture = Fixture::new();
-        let state = fixture.dir.join("state");
-        fixture.service.persistence = Some(state.clone());
+    fn refreshing_stale_conflicts_remerges_the_new_remote_commit() {
+        let fixture = Fixture::new();
         let conflicts = fixture.conflict();
-        fixture
-            .service
-            .resolve_conflict(
-                &conflicts[0].id,
-                ConflictResolution::CreateProfile {
-                    name: "Remote copy".into(),
-                },
-            )
-            .unwrap();
-        let profiles = fixture.service.catalog.profiles();
-        let new = profiles
-            .values()
-            .find(|p| p.id != fixture.profile.id)
-            .unwrap();
-        assert_eq!(new.name, "Remote copy");
-        let stored = config::read_profiles(&state.join("profiles.json"))
-            .unwrap()
-            .unwrap();
-        assert!(
-            stored
-                .iter()
-                .any(|p| p.id == new.id && p.branch == new.branch)
-        );
-        let new_tree = fixture.service.tree(new).unwrap();
-        assert_eq!(
-            fs::read(&new_tree.join(fixture.save_path())).unwrap(),
-            b"remote\n"
-        );
-        assert_eq!(
-            fs::read(&fixture.tree().join(fixture.save_path())).unwrap(),
-            b"local\n"
-        );
-    }
+        let remote_worktree = fixture.dir.join("other");
+        fs::write_atomic(&remote_worktree.join(fixture.save_path()), b"new remote\n").unwrap();
+        fs::write_atomic(
+            &remote_worktree.join(fixture.second_save_path()),
+            b"new remote second\n",
+        )
+        .unwrap();
+        RepoService::commit_changes(&remote_worktree, "new remote save").unwrap();
+        let updated_remote = git::head(&remote_worktree).unwrap();
+        git::push(
+            &fixture.root,
+            "origin",
+            &format!("refs/heads/other:refs/heads/{}", fixture.profile.branch),
+            "",
+        )
+        .unwrap();
+        git::fetch(&fixture.root, "origin", "").unwrap();
 
-    #[test]
-    fn failed_conflict_profile_persistence_keeps_conflict_and_no_new_branch() {
-        let mut fixture = Fixture::new();
-        let state = fixture.dir.join("state");
-        std::fs::create_dir_all(state.join("profiles.json")).unwrap();
-        fixture.service.persistence = Some(state);
-        let conflicts = fixture.conflict();
-        let before = git::list_branches(&fixture.root).unwrap();
+        RepoService::refresh_conflicted_worktree(
+            &fixture.tree(),
+            &fixture.root,
+            &fixture.profile.branch,
+        )
+        .unwrap();
+
+        let refreshed = fixture.service.list_conflicts().unwrap();
+        assert_eq!(refreshed.len(), conflicts.len());
         assert!(
-            fixture
-                .service
-                .resolve_conflict(
-                    &conflicts[0].id,
-                    ConflictResolution::CreateProfile {
-                        name: "Remote copy".into()
-                    }
-                )
-                .is_err()
+            refreshed
+                .iter()
+                .all(|conflict| conflict.remote_commit.id == updated_remote)
         );
-        assert_eq!(git::list_branches(&fixture.root).unwrap(), before);
-        assert_eq!(fixture.service.catalog.profiles().len(), 1);
-        assert_eq!(fixture.service.list_conflicts().unwrap().len(), 1);
+        assert!(
+            refreshed
+                .iter()
+                .all(|conflict| conflict.local_commit.id == conflicts[0].local_commit.id)
+        );
     }
 
     #[test]
@@ -1421,10 +1516,15 @@ mod validation_tests {
 /// Called under the shared operations mutex; do not lock it again or call UI code.
 pub trait RepoOperations: Send + Sync + 'static {
     fn configuration(&self) -> Option<RepositoryConfig>;
+    fn sync_preferences(&self) -> (bool, bool) {
+        (true, false)
+    }
     fn checkpoint(&self, profile: &ProfileId) -> ServiceResult<Option<CommitId>>;
     fn push(&self, profile: &ProfileId) -> ServiceResult<()>;
     fn fetch(&self) -> ServiceResult<()>;
     fn has_unpushed_commits(&self, profile: &ProfileId) -> ServiceResult<bool>;
+    /// Fetch and merge the cached remote head into one stopped profile worktree.
+    fn apply_profile_updates(&self, profile: &ProfileId) -> ServiceResult<bool>;
     /// Discover durable unpublished branches, including inactive profiles after restart.
     fn unpushed_profiles(&self) -> ServiceResult<Vec<ProfileId>>;
 }
@@ -1453,12 +1553,21 @@ impl RepoOperations for RepoService {
         self.configuration()
     }
 
+    fn sync_preferences(&self) -> (bool, bool) {
+        let settings = self.settings.data();
+        (settings.sync_after_session, settings.sync_while_gaming)
+    }
+
     fn has_unpushed_commits(&self, profile: &ProfileId) -> ServiceResult<bool> {
         self.has_unpushed_commits(&profile.to_string())
     }
 
+    fn apply_profile_updates(&self, profile: &ProfileId) -> ServiceResult<bool> {
+        Ok(!self.apply_profile_updates(&profile.to_string())?.is_empty())
+    }
+
     fn checkpoint(&self, profile: &ProfileId) -> ServiceResult<Option<CommitId>> {
-        self.checkpoint(&profile.to_string(), "SaveHub: automatic checkpoint")
+        self.checkpoint(&profile.to_string(), "SaveHub: synchronization checkpoint")
     }
 
     fn push(&self, profile: &ProfileId) -> ServiceResult<()> {

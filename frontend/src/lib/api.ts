@@ -151,6 +151,7 @@ export const api = {
   getSettings: () => call<Settings>("get_settings"),
   updateSettings: (settings: Settings) =>
     call<void>("update_settings", { settings }),
+  connectRepository: () => call<void>("connect_repository"),
   setGithubToken: (token: string) => call<void>("set_github_token", { token }),
 };
 
