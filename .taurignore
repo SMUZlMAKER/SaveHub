@@ -5,3 +5,5 @@
 !/frontend/package.json
 # tauri-build перезаписывает схемы при сборке
 /gen/
+# ролик собирается отдельно (video/), его node_modules и рендеры не должны перезапускать tauri dev
+/video/
