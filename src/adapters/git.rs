@@ -571,6 +571,34 @@ pub fn push(repo: &Path, remote: &str, refspec: &str, token: &str) -> AdapterRes
     Ok(())
 }
 
+/// Delete one remote branch through the normal receive-pack update protocol.
+pub fn delete_remote_branch(
+    repo: &Path,
+    remote: &str,
+    branch: &str,
+    token: &str,
+) -> AdapterResult<()> {
+    let reference = format!("refs/heads/{branch}");
+    if !git2::Reference::is_valid_name(&reference) {
+        return Err(invalid("Invalid branch"));
+    }
+    push(repo, remote, &format!(":{reference}"), token)
+}
+
+pub fn delete_remote_tracking_branch(repo: &Path, branch: &str) -> AdapterResult<()> {
+    let reference = format!("refs/remotes/origin/{branch}");
+    if !git2::Reference::is_valid_name(&reference) {
+        return Err(invalid("Invalid branch"));
+    }
+    let repository = Repository::open(repo)?;
+    match repository.find_reference(&reference) {
+        Ok(mut tracking) => tracking.delete()?,
+        Err(error) if error.code() == ErrorCode::NotFound => (),
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
 pub fn push_with_lease(
     repo: &Path,
     remote: &str,
@@ -801,16 +829,22 @@ pub fn archive_profile_branch(
     let expected = repo.commondir().join("savehub/trees").join(key);
     let common = repo.commondir().canonicalize()?;
     let mut local = match repo.find_branch(branch, BranchType::Local) {
-        Ok(local) => local,
-        Err(error) if error.code() == ErrorCode::NotFound => {
-            if fs::exists(&expected)? {
-                return Err(invalid("Profile worktree exists without its branch"));
-            }
-            return Ok(None);
-        }
+        Ok(local) => Some(local),
+        Err(error) if error.code() == ErrorCode::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    if local.is_head() {
+    let remote_tracking = match repo.find_reference(&format!("refs/remotes/origin/{branch}")) {
+        Ok(remote) => Some(remote),
+        Err(error) if error.code() == ErrorCode::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if local.is_none() && remote_tracking.is_none() {
+        if fs::exists(&expected)? {
+            return Err(invalid("Profile worktree exists without its branch"));
+        }
+        return Ok(None);
+    }
+    if local.as_ref().is_some_and(git2::Branch::is_head) {
         return Err(invalid("Cannot remove the main working tree branch"));
     }
     let reference = format!("refs/heads/{branch}");
@@ -861,7 +895,14 @@ pub fn archive_profile_branch(
         return Err(invalid("Archive path escapes repository metadata"));
     }
     fs::write_atomic(&archive.join("branch"), branch.as_bytes())?;
-    let tip = local.get().peel_to_commit()?.id();
+    let tip = match local.as_ref() {
+        Some(local) => local.get().peel_to_commit()?.id(),
+        None => remote_tracking
+            .as_ref()
+            .ok_or_else(|| invalid("Missing profile branch"))?
+            .peel_to_commit()?
+            .id(),
+    };
     repo.reference(
         &format!("refs/savehub/deleted-profiles/{archive_id}"),
         tip,
@@ -883,7 +924,9 @@ pub fn archive_profile_branch(
         }
     }
     // Unmerged independent histories may be removed because an archive ref pins the tip.
-    local.delete()?;
+    if let Some(local) = local.as_mut() {
+        local.delete()?;
+    }
     Ok(Some(archive))
 }
 fn clean(repo: &Repository) -> AdapterResult<()> {
@@ -1767,6 +1810,56 @@ mod tests {
         merge(&path, "other", true).unwrap();
         delete_branch(&path, "other").unwrap();
         assert!(!list_branches(&path).unwrap().contains(&"other".into()));
+    }
+
+    #[test]
+    fn archiving_remote_only_profile_branch_pins_its_history_and_removes_tracking_ref() {
+        let sandbox = Sandbox::new();
+        let root = sandbox.repo("root");
+        let bare = sandbox.0.join("remote.git");
+        Repository::init_bare(&bare).unwrap();
+        let commit = commit_files(&root, None, &[], "profile history").unwrap();
+        create_branch(&root, "profiles/remote-only", &commit).unwrap();
+        set_remote(&root, "origin", bare.to_str().unwrap()).unwrap();
+        push(
+            &root,
+            "origin",
+            "refs/heads/profiles/remote-only:refs/heads/profiles/remote-only",
+            "",
+        )
+        .unwrap();
+
+        let local = sandbox.repo("local");
+        set_remote(&local, "origin", bare.to_str().unwrap()).unwrap();
+        fetch(&local, "origin", "").unwrap();
+        assert!(
+            remote_head(&local, "profiles/remote-only")
+                .unwrap()
+                .is_some()
+        );
+
+        archive_profile_branch(&local, "profiles/remote-only", "profile-id").unwrap();
+
+        let repo = Repository::open(&local).unwrap();
+        assert!(
+            repo.find_reference("refs/remotes/origin/profiles/remote-only")
+                .is_ok()
+        );
+        delete_remote_tracking_branch(&local, "profiles/remote-only").unwrap();
+        assert!(
+            repo.find_reference("refs/remotes/origin/profiles/remote-only")
+                .is_err()
+        );
+        assert!(
+            repo.references()
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|reference| {
+                    reference
+                        .name()
+                        .is_ok_and(|name| name.starts_with("refs/savehub/deleted-profiles/"))
+                })
+        );
     }
 
     #[test]

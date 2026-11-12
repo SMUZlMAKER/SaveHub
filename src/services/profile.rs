@@ -135,9 +135,15 @@ impl ProfileService {
             ));
         }
         let profile = self.get(profile_id)?;
+        self.repo.mark_profile_deleted(&profile)?;
         self.catalog.remove_profile(profile_id);
         if let Err(error) = self.persist() {
             self.catalog.add_profile(profile);
+            if let Err(rollback) = self.repo.unmark_profile_deleted(profile_id) {
+                return Err(ServiceError::Conflict(format!(
+                    "Сохранение списка профилей: {error:?}; откат отметки удаления: {rollback:?}"
+                )));
+            }
             return Err(error);
         }
         // RepoService validates the profile through Catalog, so retain it until archival completes.
@@ -148,6 +154,13 @@ impl ProfileService {
                     "Удаление: {error:?}; восстановление метаданных: {rollback:?}"
                 ))
             })?;
+            self.repo
+                .unmark_profile_deleted(profile_id)
+                .map_err(|rollback| {
+                    ServiceError::Conflict(format!(
+                        "Удаление: {error:?}; откат отметки удаления: {rollback:?}"
+                    ))
+                })?;
             return Err(error);
         }
         self.catalog.remove_profile(profile_id);
@@ -308,6 +321,36 @@ mod tests {
             .map(|item| item.unwrap().target().unwrap())
             .collect();
         assert!(archives.contains(&tip));
+    }
+
+    #[test]
+    fn deletion_persists_a_tombstone_before_removing_profile_metadata() {
+        let mut fixture = Fixture::new();
+        let directory = fixture.root.join("local-data");
+        fixture.service.persistence = Some(directory.clone());
+        fixture.service.repo = Arc::new(
+            RepoService::new(
+                fixture.service.catalog.clone(),
+                fixture.service.runtime.clone(),
+                fixture.settings.clone(),
+            )
+            .persistent(directory.clone()),
+        );
+        fixture.service.runtime.set_running_games(Vec::new());
+        let profile = fixture.service.create("Persistent deletion").unwrap();
+
+        fixture.service.delete(&profile.id).unwrap();
+
+        assert!(fixture.service.get(&profile.id).is_err());
+        assert!(
+            crate::adapters::config::read_profile_deletions(
+                &directory.join("deleted-profiles.json")
+            )
+            .unwrap()
+            .unwrap()
+            .iter()
+            .any(|deletion| deletion.id == profile.id)
+        );
     }
 
     #[test]

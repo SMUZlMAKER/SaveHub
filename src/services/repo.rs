@@ -5,12 +5,15 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 const CATALOG_BRANCH: &str = "savehub/catalog";
+const PROFILE_DELETIONS_FILE: &str = "deleted-profiles.json";
+const PROFILE_CATALOG_BASELINE_FILE: &str = "profile-catalog-baseline.json";
 const LEASE_DURATION_MS: u64 = 120_000;
 
 /// Complete save workflows must additionally hold their shared operations lock.
@@ -105,6 +108,104 @@ fn merge_catalog_entries<T: Serialize + serde::de::DeserializeOwned>(
     Ok(merged)
 }
 
+fn filter_deleted_profiles(profiles: Vec<Profile>, deleted: &HashSet<ProfileId>) -> Vec<Profile> {
+    profiles
+        .into_iter()
+        .filter(|profile| !deleted.contains(&profile.id))
+        .collect()
+}
+
+fn validate_profile_deletions(
+    baseline: Option<&serde_json::Value>,
+    local: &[Profile],
+    remote: &[Profile],
+    local_deleted: &HashSet<ProfileId>,
+    remote_deleted: &HashSet<ProfileId>,
+) -> ServiceResult<()> {
+    let Some(baseline) = baseline.and_then(|value| value.get("profiles")) else {
+        return Ok(());
+    };
+    let baseline: Vec<Profile> = serde_json::from_value(baseline.clone())
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let records = |profiles: &[Profile]| {
+        profiles
+            .iter()
+            .map(|profile| {
+                serde_json::to_value(profile)
+                    .map(|value| (profile.id, value))
+                    .map_err(|error| ServiceError::InvalidInput(error.to_string()))
+            })
+            .collect::<ServiceResult<std::collections::HashMap<_, _>>>()
+    };
+    let baseline = records(&baseline)?;
+    let local = records(local)?;
+    let remote = records(remote)?;
+
+    for (deleted, changed_side, side_name) in [
+        (local_deleted, &remote, "удаление локально"),
+        (remote_deleted, &local, "удаление на другом компьютере"),
+    ] {
+        for id in deleted {
+            let Some(previous) = baseline.get(id) else {
+                continue;
+            };
+            if changed_side
+                .get(id)
+                .is_some_and(|current| current != previous)
+            {
+                return Err(ServiceError::Conflict(format!(
+                    "Профиль {id} изменён одновременно с удалением ({side_name})"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_profile_deletions(
+    groups: &[&[ProfileDeletion]],
+    profiles: &[Profile],
+) -> ServiceResult<Vec<ProfileDeletion>> {
+    let mut deletions: std::collections::BTreeMap<ProfileId, ProfileDeletion> =
+        std::collections::BTreeMap::new();
+    for deletion in groups.iter().flat_map(|group| group.iter()) {
+        if let Some(previous) = deletions.get(&deletion.id)
+            && previous.branch.is_some()
+            && deletion.branch.is_some()
+            && previous.branch != deletion.branch
+        {
+            return Err(ServiceError::Conflict(format!(
+                "Для профиля {} указаны разные ветки удаления",
+                deletion.id
+            )));
+        }
+        deletions
+            .entry(deletion.id)
+            .and_modify(|previous: &mut ProfileDeletion| {
+                if previous.branch.is_none() {
+                    previous.branch = deletion.branch.clone();
+                }
+            })
+            .or_insert_with(|| deletion.clone());
+    }
+
+    for deletion in deletions.values_mut() {
+        if deletion.branch.is_none() {
+            deletion.branch = profiles
+                .iter()
+                .find(|profile| profile.id == deletion.id)
+                .map(|profile| profile.branch.clone());
+        }
+        if deletion.branch.is_none() {
+            return Err(ServiceError::Conflict(format!(
+                "Не удалось определить ветку удалённого профиля {}",
+                deletion.id
+            )));
+        }
+    }
+    Ok(deletions.into_values().collect())
+}
+
 fn unique_branch<'a, I>(base: &str, branches: I) -> String
 where
     I: IntoIterator<Item = &'a str>,
@@ -171,8 +272,7 @@ impl RepoService {
         Ok(())
     }
 
-    /// Архивировать локальные данные профиля и удалить его ветку и worktree.
-    /// Удалённая ветка сохраняется: удаление локального профиля не стирает другие ПК.
+    /// Архивировать локальные данные профиля и отметить его GitHub-ветку для удаления.
     pub fn delete_profile(&self, profile_id: &ProfileId) -> ServiceResult<()> {
         let _guard = self.lock()?;
         let profile = self.profile(&profile_id.to_string())?;
@@ -236,8 +336,35 @@ impl RepoService {
                 "Профиль используется другим компьютером".into(),
             ));
         }
-        git::archive_profile_branch(&root, &profile.branch, &profile.id.to_string())
-            .map_err(ServiceError::Adapter)?;
+        let previous_deletions = self.local_profile_deletion_records()?;
+        if !previous_deletions
+            .iter()
+            .any(|deletion| deletion.id == *profile_id)
+        {
+            let mut deletions = previous_deletions.clone();
+            deletions.push(ProfileDeletion {
+                id: *profile_id,
+                branch: Some(profile.branch.clone()),
+            });
+            deletions.sort_by_key(|deletion| deletion.id);
+            self.write_local_profile_deletions(&deletions)?;
+        }
+        if let Err(error) =
+            git::archive_profile_branch(&root, &profile.branch, &profile.id.to_string())
+        {
+            if !previous_deletions
+                .iter()
+                .any(|deletion| deletion.id == *profile_id)
+            {
+                self.write_local_profile_deletions(&previous_deletions)
+                    .map_err(|rollback| {
+                        ServiceError::Conflict(format!(
+                            "Архивация профиля: {error:?}; откат отметки удаления: {rollback:?}"
+                        ))
+                    })?;
+            }
+            return Err(ServiceError::Adapter(error));
+        }
         Ok(())
     }
     pub fn new(catalog: Arc<Catalog>, runtime: Arc<RuntimeState>, settings: Arc<Settings>) -> Self {
@@ -253,6 +380,52 @@ impl RepoService {
     pub fn persistent(mut self, directory: PathBuf) -> Self {
         self.persistence = Some(directory);
         self
+    }
+
+    fn local_profile_deletion_records(&self) -> ServiceResult<Vec<ProfileDeletion>> {
+        let Some(directory) = &self.persistence else {
+            return Ok(Vec::new());
+        };
+        config::read_profile_deletions(&directory.join(PROFILE_DELETIONS_FILE))
+            .map(|deletions| deletions.unwrap_or_default())
+            .map_err(ServiceError::Adapter)
+    }
+
+    fn write_local_profile_deletions(&self, deletions: &[ProfileDeletion]) -> ServiceResult<()> {
+        if let Some(directory) = &self.persistence {
+            config::write_profile_deletions(&directory.join(PROFILE_DELETIONS_FILE), deletions)
+                .map_err(ServiceError::Adapter)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn mark_profile_deleted(&self, profile: &Profile) -> ServiceResult<()> {
+        let _guard = self.lock()?;
+        if self.runtime.active_profile() == Some(profile.id) {
+            return Err(ServiceError::InvalidInput(
+                "Активный профиль удалить нельзя".into(),
+            ));
+        }
+        let mut deletions = self.local_profile_deletion_records()?;
+        if !deletions.iter().any(|deletion| deletion.id == profile.id) {
+            deletions.push(ProfileDeletion {
+                id: profile.id,
+                branch: Some(profile.branch.clone()),
+            });
+            deletions.sort_by_key(|deletion| deletion.id);
+            self.write_local_profile_deletions(&deletions)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn unmark_profile_deleted(&self, profile_id: &ProfileId) -> ServiceResult<()> {
+        let _guard = self.lock()?;
+        let mut deletions = self.local_profile_deletion_records()?;
+        if deletions.iter().any(|deletion| deletion.id == *profile_id) {
+            deletions.retain(|deletion| deletion.id != *profile_id);
+            self.write_local_profile_deletions(&deletions)?;
+        }
+        Ok(())
     }
     pub fn configuration(&self) -> Option<RepositoryConfig> {
         let settings = self.settings.data();
@@ -360,15 +533,85 @@ impl RepoService {
             .catalog_baseline
             .lock()
             .map_err(|_| ServiceError::Conflict("Блокировка каталога повреждена".into()))?;
+        if baseline.is_none()
+            && let Some(directory) = &self.persistence
+            && let Some(profiles) =
+                config::read_profiles(&directory.join(PROFILE_CATALOG_BASELINE_FILE))
+                    .map_err(ServiceError::Adapter)?
+        {
+            *baseline = Some(serde_json::json!({"profiles": profiles}));
+        }
+        let local_deletion_records = self.local_profile_deletion_records()?;
+        let local_deletions: HashSet<_> = local_deletion_records
+            .iter()
+            .map(|deletion| deletion.id)
+            .collect();
+        let disk_deletion_records =
+            config::read_profile_deletions(&path.join(PROFILE_DELETIONS_FILE))
+                .map_err(ServiceError::Adapter)?
+                .unwrap_or_default();
+        let disk_deletions: HashSet<_> = disk_deletion_records
+            .iter()
+            .map(|deletion| deletion.id)
+            .collect();
         let disk_profiles = config::read_profiles(&path.join("profiles.json"))
             .map_err(ServiceError::Adapter)?
             .unwrap_or_default();
-        let profiles = merge_catalog_entries(
-            baseline.as_ref().and_then(|b| b.get("profiles")),
+        validate_profile_deletions(
+            baseline.as_ref(),
             &profiles,
             &disk_profiles,
+            &local_deletions,
+            &disk_deletions,
+        )?;
+        let deleted: HashSet<_> = local_deletions.union(&disk_deletions).copied().collect();
+        let local_profiles = filter_deleted_profiles(profiles, &deleted);
+        let disk_profiles = filter_deleted_profiles(disk_profiles, &deleted);
+        let merge_baseline = baseline
+            .as_ref()
+            .map(|value| {
+                let profiles = value
+                    .get("profiles")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
+                let profiles: Vec<Profile> = serde_json::from_value(profiles)
+                    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+                Ok::<_, ServiceError>(serde_json::json!({
+                    "profiles": filter_deleted_profiles(profiles, &deleted)
+                }))
+            })
+            .transpose()?;
+        let mut profiles = merge_catalog_entries(
+            merge_baseline.as_ref().and_then(|b| b.get("profiles")),
+            &local_profiles,
+            &disk_profiles,
+        )?;
+        if self
+            .runtime
+            .active_profile()
+            .is_some_and(|active| !profiles.iter().any(|profile| profile.id == active))
+        {
+            return Err(ServiceError::Conflict(
+                "Синхронизация удаляет активный профиль. Переключитесь на другой профиль и повторите синхронизацию"
+                    .into(),
+            ));
+        }
+        profiles.sort_by_key(|profile| profile.id);
+        let mut known_profiles = self.catalog.profiles().into_values().collect::<Vec<_>>();
+        known_profiles.extend(disk_profiles.iter().cloned());
+        if let Some(baseline) = baseline.as_ref().and_then(|value| value.get("profiles")) {
+            known_profiles.extend(
+                serde_json::from_value::<Vec<Profile>>(baseline.clone())
+                    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?,
+            );
+        }
+        let mut deletions = merge_profile_deletions(
+            &[&local_deletion_records, &disk_deletion_records],
+            &known_profiles,
         )?;
         config::write_profiles(&path.join("profiles.json"), &profiles)
+            .map_err(ServiceError::Adapter)?;
+        config::write_profile_deletions(&path.join(PROFILE_DELETIONS_FILE), &deletions)
             .map_err(ServiceError::Adapter)?;
         Self::commit_changes(&path, "Update shared catalog")?;
         if let Some(remote) =
@@ -391,11 +634,84 @@ impl RepoService {
         let profiles = config::read_profiles(&path.join("profiles.json"))
             .map_err(ServiceError::Adapter)?
             .unwrap_or_default();
+        let disk_deletion_records =
+            config::read_profile_deletions(&path.join(PROFILE_DELETIONS_FILE))
+                .map_err(ServiceError::Adapter)?
+                .unwrap_or_default();
+        let mut disk_deletions: HashSet<_> = disk_deletion_records
+            .iter()
+            .map(|deletion| deletion.id)
+            .collect();
+        disk_deletions.extend(local_deletions.iter().copied());
+        let remote_deletions: HashSet<_> = disk_deletions
+            .difference(&local_deletions)
+            .copied()
+            .collect();
+        validate_profile_deletions(
+            baseline.as_ref(),
+            &self.catalog.profiles().into_values().collect::<Vec<_>>(),
+            &profiles,
+            &local_deletions,
+            &remote_deletions,
+        )?;
+        let mut profiles = filter_deleted_profiles(profiles, &disk_deletions);
+        if self
+            .runtime
+            .active_profile()
+            .is_some_and(|active| !profiles.iter().any(|profile| profile.id == active))
+        {
+            return Err(ServiceError::Conflict(
+                "Синхронизация удаляет активный профиль. Переключитесь на другой профиль и повторите синхронизацию"
+                    .into(),
+            ));
+        }
+        profiles.sort_by_key(|profile| profile.id);
+        let mut known_profiles = self.catalog.profiles().into_values().collect::<Vec<_>>();
+        known_profiles.extend(profiles.iter().cloned());
+        if let Some(baseline) = baseline.as_ref().and_then(|value| value.get("profiles")) {
+            known_profiles.extend(
+                serde_json::from_value::<Vec<Profile>>(baseline.clone())
+                    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?,
+            );
+        }
+        deletions = merge_profile_deletions(
+            &[&local_deletion_records, &disk_deletion_records],
+            &known_profiles,
+        )?;
+        for deletion in &deletions {
+            if let Some(profile) =
+                self.catalog
+                    .profiles()
+                    .get(&deletion.id)
+                    .cloned()
+                    .or_else(|| {
+                        known_profiles
+                            .iter()
+                            .find(|profile| profile.id == deletion.id)
+                            .cloned()
+                    })
+            {
+                if profile.branch != deletion.branch.as_deref().unwrap_or_default() {
+                    return Err(ServiceError::Conflict(format!(
+                        "Ветка профиля {} изменилась во время синхронизации",
+                        deletion.id
+                    )));
+                }
+                self.archive_deleted_profile(root, &profile)?;
+            }
+        }
+        config::write_profiles(&path.join("profiles.json"), &profiles)
+            .map_err(ServiceError::Adapter)?;
+        config::write_profile_deletions(&path.join(PROFILE_DELETIONS_FILE), &deletions)
+            .map_err(ServiceError::Adapter)?;
+        Self::commit_changes(&path, "Apply shared profile deletions")?;
+        let next_baseline_profiles = profiles.clone();
         if let Some(directory) = &self.persistence {
+            config::write_profile_deletions(&directory.join(PROFILE_DELETIONS_FILE), &deletions)
+                .map_err(ServiceError::Adapter)?;
             config::write_profiles(&directory.join("profiles.json"), &profiles)
                 .map_err(ServiceError::Adapter)?;
         }
-        *baseline = Some(serde_json::json!({"profiles": profiles}));
         self.catalog.replace_profiles(profiles);
         git::push(
             root,
@@ -404,6 +720,84 @@ impl RepoService {
             token,
         )
         .map_err(ServiceError::Adapter)?;
+        for deletion in &deletions {
+            let branch = deletion.branch.as_deref().ok_or_else(|| {
+                ServiceError::Conflict(format!(
+                    "Не удалось определить ветку удалённого профиля {}",
+                    deletion.id
+                ))
+            })?;
+            git::delete_remote_branch(root, "origin", branch, token)
+                .map_err(ServiceError::Adapter)?;
+            git::delete_remote_tracking_branch(root, branch).map_err(ServiceError::Adapter)?;
+        }
+        if let Some(directory) = &self.persistence {
+            config::write_profiles(
+                &directory.join(PROFILE_CATALOG_BASELINE_FILE),
+                &next_baseline_profiles,
+            )
+            .map_err(ServiceError::Adapter)?;
+        }
+        *baseline = Some(serde_json::json!({"profiles": next_baseline_profiles}));
+        Ok(())
+    }
+
+    fn archive_deleted_profile(&self, root: &Path, profile: &Profile) -> ServiceResult<()> {
+        if self.runtime.active_profile() == Some(profile.id) {
+            return Err(ServiceError::Conflict(
+                "Синхронизация удаляет активный профиль. Переключитесь на другой профиль и повторите синхронизацию"
+                    .into(),
+            ));
+        }
+        self.stopped()?;
+        if self
+            .runtime
+            .pending_sessions()
+            .iter()
+            .any(|(_, id)| id == &profile.id)
+        {
+            return Err(ServiceError::Conflict(
+                "Дождитесь сохранения завершённой игровой сессии".into(),
+            ));
+        }
+        if self
+            .runtime
+            .conflicts()
+            .iter()
+            .any(|conflict| conflict.profile_id == profile.id)
+        {
+            return Err(ServiceError::Conflict(
+                "Сначала разрешите конфликты профиля".into(),
+            ));
+        }
+        let (_, _, lease) = self.lease(root, profile)?;
+        if lease.is_some_and(|lease| {
+            lease.expires_at > now() && lease.machine_id != self.settings.local().machine_id
+        }) {
+            return Err(ServiceError::Conflict(
+                "Профиль используется другим компьютером".into(),
+            ));
+        }
+        if let Some(tree) = git::existing_worktree(root, &profile.branch, &profile.id.to_string())
+            .map_err(ServiceError::Adapter)?
+        {
+            let tree = fs::canonicalize(&tree).map_err(ServiceError::Adapter)?;
+            for game in self.catalog.games().values() {
+                for source in super::bindings::linked_paths(game, &self.settings.local())? {
+                    if fs::canonicalize(&source)
+                        .map_err(ServiceError::Adapter)?
+                        .starts_with(tree.join("games").join(game.id.to_string()))
+                    {
+                        return Err(ServiceError::Conflict(
+                            "На профиль ещё ссылается папка игры. Сначала отключите её сохранения"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+        }
+        git::archive_profile_branch(root, &profile.branch, &profile.id.to_string())
+            .map_err(ServiceError::Adapter)?;
         Ok(())
     }
     pub fn status(&self) -> ServiceResult<SyncStatus> {
@@ -1343,6 +1737,165 @@ mod tests {
     }
 
     #[test]
+    fn catalog_sync_rejects_deleting_the_active_profile_without_persisting_it() {
+        let mut fixture = Fixture::new();
+        let persistence = fixture.dir.join("local-data");
+        fixture.service.persistence = Some(persistence.clone());
+        fixture.service.runtime.set_running_games(Vec::new());
+        fixture
+            .service
+            .runtime
+            .set_active_profile(Some(fixture.profile.id))
+            .unwrap();
+        config::write_profiles(
+            &persistence.join("profiles.json"),
+            std::slice::from_ref(&fixture.profile),
+        )
+        .unwrap();
+
+        let deleted = serde_json::to_vec(&[fixture.profile.id]).unwrap();
+        let profiles = serde_json::to_vec(&Vec::<Profile>::new()).unwrap();
+        let commit = git::commit_files(
+            &fixture.root,
+            None,
+            &[
+                ("profiles.json", &profiles),
+                (PROFILE_DELETIONS_FILE, &deleted),
+            ],
+            "Delete active profile remotely",
+        )
+        .unwrap();
+        git::push(
+            &fixture.root,
+            "origin",
+            &format!("{commit}:refs/heads/{CATALOG_BRANCH}"),
+            "",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            fixture.service.sync_catalog_at(&fixture.root, ""),
+            Err(ServiceError::Conflict(_))
+        ));
+        assert!(
+            fixture
+                .service
+                .catalog
+                .profiles()
+                .contains_key(&fixture.profile.id)
+        );
+        assert_eq!(
+            config::read_profiles(&persistence.join("profiles.json"))
+                .unwrap()
+                .unwrap()[0]
+                .id,
+            fixture.profile.id
+        );
+        assert_eq!(
+            fixture.service.runtime.active_profile(),
+            Some(fixture.profile.id)
+        );
+    }
+
+    #[test]
+    fn profile_deletion_tombstone_survives_restart_without_a_baseline() {
+        let mut fixture = Fixture::new();
+        let persistence = fixture.dir.join("local-data");
+        fixture.service.persistence = Some(persistence.clone());
+        let profile_commit =
+            git::commit_files(&fixture.root, None, &[], "Profile save history").unwrap();
+        git::create_branch(&fixture.root, &fixture.profile.branch, &profile_commit).unwrap();
+        git::push(
+            &fixture.root,
+            "origin",
+            &format!(
+                "refs/heads/{}:refs/heads/{}",
+                fixture.profile.branch, fixture.profile.branch
+            ),
+            "",
+        )
+        .unwrap();
+        fixture.service.sync_catalog_at(&fixture.root, "").unwrap();
+
+        fixture
+            .service
+            .mark_profile_deleted(&fixture.profile)
+            .unwrap();
+        fixture.service.catalog.remove_profile(&fixture.profile.id);
+        config::write_profiles(&persistence.join("profiles.json"), &[]).unwrap();
+        std::fs::remove_file(persistence.join(PROFILE_CATALOG_BASELINE_FILE)).unwrap();
+
+        let catalog = Arc::new(Catalog::new(HashMap::new(), HashMap::new()));
+        let runtime = Arc::new(RuntimeState::new(
+            None,
+            Vec::new(),
+            SyncStatus {
+                state: SyncState::Idle,
+                last_sync_at: None,
+                error: None,
+            },
+        ));
+        let restarted = RepoService::new(
+            catalog.clone(),
+            runtime.clone(),
+            fixture.service.settings.clone(),
+        )
+        .persistent(persistence.clone());
+        restarted.runtime.set_running_games(Vec::new());
+        restarted.sync_catalog_at(&fixture.root, "").unwrap();
+
+        assert!(!catalog.profiles().contains_key(&fixture.profile.id));
+        assert!(
+            config::read_profile_deletions(&persistence.join(PROFILE_DELETIONS_FILE))
+                .unwrap()
+                .unwrap()
+                .iter()
+                .any(|deletion| deletion.id == fixture.profile.id)
+        );
+        let remote = git2::Repository::open_bare(&fixture.remote).unwrap();
+        assert!(
+            remote
+                .find_reference(&format!("refs/heads/{}", fixture.profile.branch))
+                .is_err()
+        );
+        assert!(
+            git2::Repository::open(&fixture.root)
+                .unwrap()
+                .find_reference(&format!("refs/remotes/origin/{}", fixture.profile.branch))
+                .is_err()
+        );
+        let tree = remote
+            .find_reference(&format!("refs/heads/{CATALOG_BRANCH}"))
+            .unwrap()
+            .peel_to_tree()
+            .unwrap();
+        let profiles: Vec<Profile> = serde_json::from_slice(
+            remote
+                .find_blob(tree.get_name("profiles.json").unwrap().id())
+                .unwrap()
+                .content(),
+        )
+        .unwrap();
+        assert!(profiles.is_empty());
+
+        let persisted = config::read_profiles(&persistence.join("profiles.json"))
+            .unwrap()
+            .unwrap();
+        let catalog = Arc::new(Catalog::new(
+            HashMap::new(),
+            persisted
+                .into_iter()
+                .map(|profile| (profile.id, profile))
+                .collect(),
+        ));
+        RepoService::new(catalog.clone(), runtime, fixture.service.settings.clone())
+            .persistent(persistence)
+            .sync_catalog_at(&fixture.root, "")
+            .unwrap();
+        assert!(!catalog.profiles().contains_key(&fixture.profile.id));
+    }
+
+    #[test]
     fn catalog_sync_imports_remote_profiles_and_persists_them_locally() {
         let mut fixture = Fixture::new();
         let persistence = fixture.dir.join("local-data");
@@ -1403,6 +1956,38 @@ mod tests {
         assert_eq!(merged[0].name, "New name");
         let merged = merge_catalog_entries::<Game>(None, &[], &[fixture.game.clone()]).unwrap();
         assert_eq!(merged.len(), 1);
+    }
+
+    #[test]
+    fn profile_deletion_conflicts_with_a_concurrent_remote_edit() {
+        let fixture = Fixture::new();
+        let baseline = serde_json::json!({"profiles": [fixture.profile.clone()]});
+        let mut edited = fixture.profile.clone();
+        edited.name = "Renamed elsewhere".into();
+        let local_deleted = HashSet::from([fixture.profile.id]);
+        assert!(
+            validate_profile_deletions(
+                Some(&baseline),
+                &[],
+                &[edited],
+                &local_deleted,
+                &HashSet::new(),
+            )
+            .is_err()
+        );
+
+        let mut edited = fixture.profile.clone();
+        edited.name = "Renamed locally".into();
+        assert!(
+            validate_profile_deletions(
+                Some(&baseline),
+                &[edited],
+                &[],
+                &HashSet::new(),
+                &local_deleted,
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -78,9 +78,11 @@ pub async fn list_profiles(
 /// После успеха — событие `events::PROFILE_CHANGED` и обновить меню трея.
 #[tauri::command]
 pub async fn switch_profile(app: tauri::AppHandle, profile_id: ProfileId) -> ApiResult<()> {
-    tauri::async_runtime::spawn_blocking(move || crate::app::actions::switch_profile(&app, profile_id))
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::app::actions::switch_profile(&app, profile_id)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))?
 }
 
 #[tauri::command]
@@ -102,8 +104,14 @@ pub async fn create_profile(
 pub async fn delete_profile(
     app: tauri::AppHandle,
     profile_id: ProfileId,
+    confirmed: bool,
     service: State<'_, Arc<ProfileService>>,
 ) -> ApiResult<()> {
+    if !confirmed {
+        return Err(ApiError::Rejected(
+            "Подтвердите удаление профиля и его ветки сохранений".into(),
+        ));
+    }
     let service = service.inner().clone();
     tauri::async_runtime::spawn_blocking(move || service.delete(&profile_id))
         .await

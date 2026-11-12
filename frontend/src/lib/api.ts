@@ -127,8 +127,8 @@ export const api = {
     call<void>("switch_profile", { profileId }),
   createProfile: (name: string): Promise<Profile> =>
     call<Profile>("create_profile", { name }),
-  deleteProfile: (profileId: string) =>
-    call<void>("delete_profile", { profileId }),
+  deleteProfile: (profileId: string, confirmed: boolean) =>
+    call<void>("delete_profile", { profileId, confirmed }),
 
   // src/api/saves.rs
   listSaves: (game: string) => call<Save[]>("list_saves", { game }),
