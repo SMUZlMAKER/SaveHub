@@ -3,7 +3,7 @@
   import { api, describeError, events, subscribe } from '../lib/api'
   import type { AppFeatures, Game, GameStatus, SyncStatus } from '../lib/types'
   import FirstRun from '../lib/components/FirstRun.svelte'
-  let { features, onsettings }: { features: AppFeatures; onsettings: () => void } = $props()
+  let { features, onsettings }: { features: AppFeatures; onsettings: (target: 'repository' | 'token') => void } = $props()
 
   import { notice } from '../lib/notice.svelte'
   import GameForm from '../lib/components/GameForm.svelte'

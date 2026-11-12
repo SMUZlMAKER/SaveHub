@@ -5,7 +5,6 @@
   import { notice } from './lib/notice.svelte'
   import type { AppFeatures } from './lib/types'
   import type { GameProcessEvent, ScreenId, SyncStatus, UpdateStatus } from './lib/types'
-  import LaunchPanel from './lib/components/LaunchPanel.svelte'
   import GamesScreen from './screens/GamesScreen.svelte'
   import ProfilesScreen from './screens/ProfilesScreen.svelte'
   import SavesScreen from './screens/SavesScreen.svelte'
@@ -35,6 +34,7 @@
   let processError = $state('')
   let update = $state<UpdateStatus | null>(null)
   let screen = $state<ScreenId>('games')
+  let settingsTarget = $state<'repository' | 'token' | undefined>(undefined)
   let sync = $state<SyncStatus | null>(null)
   let conflictCount = $state(0)
   let syncing = $state(false)
@@ -139,7 +139,7 @@
 {/if}
 
 {#if processError}<aside class="error" role="alert">{processError}</aside>{/if}
-<LaunchPanel />
+
 
 <main>
   {#if featureError}
@@ -149,13 +149,13 @@
   {:else}
   {#if syncError}<p role="alert">{syncError} <button onclick={loadSync}>Повторить проверку</button></p>{/if}
   {#if screen === 'games'}
-    <GamesScreen {features} onsettings={() => screen = 'settings'} />
+    <GamesScreen {features} onsettings={(target) => { settingsTarget = target; screen = 'settings' }} />
   {:else if screen === 'profiles'}
     <ProfilesScreen {features} />
   {:else if screen === 'saves'}
     <SavesScreen {features} />
   {:else if screen === 'settings'}
-    <SettingsScreen {features} />
+    <SettingsScreen {features} target={settingsTarget} />
   {:else}
     <ConflictsScreen {features} />
   {/if}

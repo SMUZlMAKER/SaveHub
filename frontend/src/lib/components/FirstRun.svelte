@@ -5,7 +5,7 @@
 
   let { features, gamesCount, gamesLoading, gamesError, onsettings, onadd, adding }:
     { features: AppFeatures; gamesCount: number; gamesLoading: boolean; gamesError: string;
-      onsettings: () => void; onadd: () => void; adding: boolean } = $props()
+      onsettings: (target: 'repository' | 'token') => void; onadd: () => void; adding: boolean } = $props()
   let settings = $state<Settings | null>(null)
   let loading = $state(true)
   let error = $state('')
@@ -22,6 +22,7 @@
   onMount(load)
 </script>
 
+{#if !complete}
 <section class="card first-run" aria-labelledby="first-run-title">
   <h3 id="first-run-title">{complete ? 'Параметры заполнены' : 'Начните с настройки'}</h3>
   {#if loading}
@@ -31,13 +32,14 @@
     <button onclick={load}>Повторить</button>
   {:else}
     <ol>
-      <li><div class="grow"><strong>Репозиторий сохранений</strong><span class="muted block">{repositorySet ? 'Параметры репозитория указаны' : features.sync ? 'Укажите адрес GitHub и папку на этом компьютере' : 'Укажите уже созданный локальный Git-репозиторий сохранений; автоматическое клонирование пока недоступно'}</span></div><button onclick={onsettings}>{repositorySet ? 'Изменить' : 'Настроить'}</button></li>
-      {#if features.sync}<li><div class="grow"><strong>Доступ к GitHub</strong><span class="muted block">{settings?.hasGithubToken ? 'Токен сохранён; доступ к репозиторию ещё не подтверждён' : 'Сохраните токен в настройках'}</span></div><button onclick={onsettings}>{settings?.hasGithubToken ? 'Настройки' : 'Указать токен'}</button></li>{/if}
-      <li><div class="grow"><strong>Первая игра</strong><span class="muted block">{gamesLoading ? 'Проверяем список игр…' : gamesError ? 'Список игр не удалось загрузить' : hasGames ? 'Игра добавлена в список' : 'Выберите exe и папку сохранений'}</span></div><button disabled={gamesLoading || !!gamesError || adding} onclick={onadd}>{hasGames ? 'Добавить ещё' : 'Добавить игру'}</button></li>
+      <li class:done={repositorySet}><div class="grow"><strong>Репозиторий сохранений</strong><span class="muted block">{repositorySet ? 'Параметры репозитория указаны' : features.sync ? 'Укажите адрес GitHub и папку на этом компьютере' : 'Укажите уже созданный локальный Git-репозиторий сохранений; автоматическое клонирование пока недоступно'}</span></div><button onclick={() => onsettings('repository')}>{repositorySet ? 'Изменить' : 'Настроить'}</button></li>
+      {#if features.sync}<li class:done={settings?.hasGithubToken}><div class="grow"><strong>Доступ к GitHub</strong><span class="muted block">{settings?.hasGithubToken ? 'Токен сохранён; доступ к репозиторию ещё не подтверждён' : 'Сохраните токен в настройках'}</span></div><button onclick={() => onsettings('token')}>{settings?.hasGithubToken ? 'Настройки' : 'Указать токен'}</button></li>{/if}
+      <li class:done={hasGames}><div class="grow"><strong>Первая игра</strong><span class="muted block">{gamesLoading ? 'Проверяем список игр…' : gamesError ? 'Список игр не удалось загрузить' : hasGames ? 'Игра добавлена в список' : 'Выберите exe и папку сохранений'}</span></div><button disabled={gamesLoading || !!gamesError || adding} onclick={onadd}>{hasGames ? 'Добавить ещё' : 'Добавить игру'}</button></li>
     </ol>
     <p class="muted">{features.sync ? 'Заполнение параметров не подтверждает подключение. Результат синхронизации появится вверху окна.' : 'Полная синхронизация между ПК пока недоступна. С локальным Git-репозиторием можно переключать профили и восстанавливать сохранения.'}</p>
   {/if}
 </section>
+{/if}
 
 <style>
   .first-run { margin: 16px 0; padding: 16px; }
@@ -45,6 +47,7 @@
   ol { padding: 0; margin: 0 0 12px; list-style: none; counter-reset: step; }
   li { display: flex; gap: 12px; align-items: center; padding: 12px 0; counter-increment: step; }
   li::before { content: counter(step); display: grid; place-items: center; flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); }
+  li.done::before { background: #d1fae5; color: #065f46; font-weight: 700; }
   li + li { border-top: 1px solid var(--border); }
   p { margin-bottom: 0; }
   @media (max-width: 560px) { li { flex-wrap: wrap; } li .grow { flex-basis: calc(100% - 42px); } li button { margin-left: 38px; } }
