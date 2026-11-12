@@ -1,37 +1,142 @@
 # SaveHub
 
-SaveHop is a system tray app that switches game save profiles across all your games at once and syncs them between PCs via your own GitHub repository. Built for games without cloud saves.
+Приложение для Windows, которое держит отдельные сохранения игр для каждого
+игрока и переносит их между ПК через ваш собственный репозиторий на GitHub.
+Сделано для игр без облачных сохранений: пиратских сборок, инди-игр и игр
+вне больших лаунчеров.
 
-## Frontend ↔ backend transport
+Проект команды #174 на хакатоне DevDays Осень 2026 (ИТМО).
 
-The Windows application uses Tauri IPC (`invoke`) instead of a localhost HTTP
-server. This is the intended boundary for a single-process desktop application:
-it avoids port management, serialization duplicated in an HTTP layer, and an
-unnecessary local network attack surface. The frontend calls only
-`frontend/src/lib/api.ts`; Rust commands are registered in
-`src/app/app.rs`.
+- Презентация: _ссылка будет добавлена_
+- Ролик: _ссылка будет добавлена_
+- Релизы: https://github.com/SMUZlMAKER/SaveHub/releases
 
-The product requirements can still be described as resource operations:
+## Зачем
 
-| Product operation | Tauri command |
+На одном компьютере играют несколько человек, а у игры одна папка сохранений.
+Кто-то сел за чужой сейв, и прогресс перемешался или пропал. Ещё сохранения
+остаются на одном ПК: продолжить игру на ноутбуке или у друга нельзя.
+
+SaveHub решает обе проблемы:
+
+- **профили** — у каждого игрока свой набор сохранений для всех игр сразу;
+- **история** — перед каждым переключением и после каждой игровой сессии
+  делается снимок, любой можно восстановить;
+- **Синхронизация между ПК.** SaveHub получает и отправляет изменения через
+  GitHub-репозиторий сохранений. Перед запуском игры приложение обновляет
+  выбранный профиль; полную синхронизацию всех профилей можно запустить вручную.
+  Автоматическую отправку после игровых сессий и передачу уже созданных коммитов
+  во время игры можно настроить отдельно.
+
+## Возможности
+
+- **Добавление игры по exe.** По пути к exe приложение находит игру во встроенной
+  базе ([ludusavi-manifest](https://github.com/mtkennerly/ludusavi-manifest),
+  ~19 тыс. игр) и подставляет папку с сохранениями. Игры из Steam и сборки вне
+  лаунчеров распознаются по Steam app id и имени папки.
+- **Профили.** Создание, удаление и переключение профиля из окна или трея.
+  Переключение заблокировано, пока запущена игра.
+- **Ярлыки на рабочем столе.** Ярлык запускает игру через SaveHub: сначала
+  можно выбрать профиль, затем подставляются его сохранения.
+- **Слежение за играми.** SaveHub видит запущенные игры и после завершения
+  сессии сохраняет снимок.
+- **Ручной снимок прямо из игры.** Горячая клавиша `Ctrl+Alt+F9` (её можно
+  сменить или отключить в настройках) или кнопка у запущенной игры. Результат
+  показывается во всплывающем окне поверх игры.
+- **История и восстановление.** Снимки сгруппированы по игровым сессиям,
+  есть фильтры по игре, профилю, причине и датам. Любой снимок можно
+  восстановить.
+- **Конфликты.** Если сохранения разошлись, можно выбрать, какую версию
+  оставить; обе версии сохраняются в резервную копию.
+- **Список игр в отдельном репозитории GitHub** — один раз настроили игры
+  и получили их на другом ПК.
+- **Трей и автообновление.** Приложение работает в трее и обновляется само
+  из стабильных релизов.
+
+## Как это работает
+
+```text
+C:\Games\Game\saves ──junction──> <репозиторий>\.git\savehub\trees\<профиль>\games\<id игры>
+                                   │
+                                   └── git: своя ветка на каждый профиль ──> GitHub
+```
+
+1. Папка сохранений игры переносится в Git-репозиторий, а на её месте
+   создаётся junction (на Linux — symlink). Игра ничего не замечает.
+   Исходная папка не удаляется, а переименовывается в `.savehub-original-<UUID>`.
+2. У каждого профиля своя ветка и рабочая копия (git worktree). Переключение
+   профиля коммитит уходящий профиль и перенаправляет junction на папки нового.
+3. После завершения игры SaveHub сохраняет изменения в истории профиля.
+   При включённой настройке приложение автоматически отправляет контрольные
+   точки, когда игры закрыты; во время игры можно разрешить отправку уже
+   созданных коммитов, но текущие файлы игры не фиксируются.
+4. Перед запуском игры SaveHub получает изменения из GitHub и применяет их
+   к выбранному профилю. Полная ручная синхронизация обменивается изменениями
+   всех профилей; если изменения разошлись, приложение попросит разрешить конфликт.
+
+## Статус
+
+| Функция | Состояние |
 | --- | --- |
-| `GET /me` | `current_profile` |
-| `GET /games/{game}/status` | `get_game_status` |
-| `GET /games` | `list_games` |
-| `PUT /saves/{game}` | `add_game` / `set_game_save_path` |
-| `GET /saves/{game}` | `list_saves` |
-| `POST /saves/{game}/choose` | `choose_save` |
-| `GET /saves/{game}/conflict` | `get_save_conflict` |
-| `POST /saves/{game}/conflict` | `resolve_save_conflict` |
-| `GET /profiles` | `list_profiles` |
-| `POST /profile` | `create_profile` |
-| `POST /profiles/set?profile_id=...` | `switch_profile` |
+| Профили, переключение, история, восстановление | работает |
+| Ручные снимки по горячей клавише | работает |
+| Подсказка папки сохранений по exe | работает |
+| Ярлыки, слежение за процессами, трей | работает |
+| Список игр через отдельный репозиторий GitHub | работает |
+| Синхронизация сохранений и профилей между ПК через GitHub | работает |
+| Подключение и клонирование GitHub-репозитория из приложения | работает |
+| Локальная работа без GitHub | работает |
 
-Commands are intentionally thin. File operations, process detection and git
-integration belong in adapters; orchestration belongs in services/workflows.
-If a future web, CLI or remote client is required, the same service layer can
-be exposed through HTTP without coupling the desktop frontend to HTTP today.
+Поддерживается Windows x64.
 
-## Contributing guide (russian)
+## Установка
 
-See [CONTRIBUTING.md](CONTRIBUTING.md)
+Скачайте `SaveHub_<версия>_x64-setup.exe` из
+[последнего релиза](https://github.com/SMUZlMAKER/SaveHub/releases/latest)
+и запустите. Установка не требует прав администратора, WebView2 скачается
+автоматически при необходимости.
+
+## Быстрый старт
+
+1. Создайте пустой репозиторий для сохранений на GitHub.
+2. Создайте [токен GitHub](https://github.com/settings/personal-access-tokens)
+   с доступом на запись к этому репозиторию.
+3. В SaveHub откройте **Настройки**: укажите адрес репозитория и путь к пустой
+   локальной папке, сохраните токен и нажмите **Подключить репозиторий GitHub**.
+   SaveHub проверит доступ и клонирует репозиторий в выбранную папку. Токен
+   хранится в системном хранилище Windows.
+4. По желанию создайте второй пустой репозиторий для списка игр и укажите его
+   в разделе **Список игр** — тогда игры появятся и на другом ПК.
+5. На экране **Игры** нажмите «Добавить игру», выберите exe. Папка сохранений
+   подставится сама; проверьте её.
+6. На экране **Профили** создайте профили для каждого игрока.
+
+## Сборка из исходников
+
+Нужны Windows, [Node.js 24](https://nodejs.org/), [Rust](https://rustup.rs/)
+(toolchain MSVC) и Visual Studio Build Tools с компонентом C++.
+
+```bash
+git clone https://github.com/SMUZlMAKER/SaveHub.git
+cd SaveHub/frontend
+npm ci
+npm run tauri dev                                    # запуск для разработки
+npm run tauri -- build --bundles nsis -- --locked    # установщик в target/release/bundle/nsis/
+```
+
+Стек, архитектура, тесты, CI и релизы — в [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Команда
+
+| Участник | Что делал |
+| --- | --- |
+| Артур Султанов ([@sultanowskii](https://github.com/sultanowskii)) | архитектура и каркас сервисов, исследование junction/symlink, Git PoC, фоновый воркер репозитория, сервис сохранений, каталог игр |
+| Матвей Томилов ([@SMUZlMAKER](https://github.com/SMUZlMAKER)) | бэкенд профилей и сервисов, синхронизация и разрешение конфликтов в интерфейсе |
+| Михаил Максименко ([@MikhailMaximenko](https://github.com/MikhailMaximenko)) | адаптеры файловой системы и Git, жизненный цикл репозиториев профилей |
+| Матвей Игошин ([@krino45](https://github.com/krino45)) | CI и релизы, автообновление, ярлыки и запуск игр, трей, токен GitHub, ручные снимки |
+| Георгий Бердников ([@Berdorge](https://github.com/Berdorge)) | интерфейс, форма добавления игры и подсказка папки сохранений по exe, первый запуск |
+
+## Благодарности
+
+База путей к сохранениям — [ludusavi-manifest](https://github.com/mtkennerly/ludusavi-manifest)
+(код под MIT, данные собраны с [PCGamingWiki](https://www.pcgamingwiki.com/)).

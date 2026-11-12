@@ -1,6 +1,7 @@
 # Разработка
 
-Стек: Rust, Tauri 2, Svelte 5, TypeScript, Vite. Фронтенд — `frontend/`,
+Стек: Rust, Tauri 2, Svelte 5, TypeScript, Vite; git2 для работы с репозиториями,
+junction для подмены папок сохранений. Фронтенд — `frontend/`,
 конфигурация Tauri — `tauri.conf.json`. В проекте используются окончания строк LF.
 
 Для Windows нужны Node.js 24, Rust MSVC, Visual Studio Build Tools с C++ и WebView2.
@@ -99,6 +100,24 @@ npm run tauri -- build --bundles nsis --config target/updater/tauri.updater.conf
 ## Работа с кодом
 
 ### Контракт фронт ↔ бэк
+
+Интерфейс вызывает Rust-код напрямую через Tauri IPC, без локального HTTP-сервера:
+для одного приложения на одном компьютере так проще, и наружу не открывается
+ни один порт. Операции продукта, записанные как HTTP-ресурсы, соответствуют командам так:
+
+| Операция | Tauri-команда |
+| --- | --- |
+| `GET /me` | `current_profile` |
+| `GET /games/{game}/status` | `get_game_status` |
+| `GET /games` | `list_games` |
+| `PUT /saves/{game}` | `add_game` / `set_game_save_path` |
+| `GET /saves/{game}` | `list_saves` |
+| `POST /saves/{game}/choose` | `choose_save` |
+| `GET /saves/{game}/conflict` | `get_save_conflict` |
+| `POST /saves/{game}/conflict` | `resolve_save_conflict` |
+| `GET /profiles` | `list_profiles` |
+| `POST /profile` | `create_profile` |
+| `POST /profiles/set?profile_id=...` | `switch_profile` |
 
 Команды находятся в `src/api/`, вызовы фронтенда — в `frontend/src/lib/api.ts`.
 Команды вызывают сервисы и сценарии; ошибки переводятся в `ApiError`.
