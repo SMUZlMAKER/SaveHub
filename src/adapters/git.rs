@@ -941,26 +941,54 @@ pub fn archive_profile_branch(
         false,
         "Archive deleted profile",
     )?;
-    if let Some((worktree, metadata)) = managed {
-        // Keep previous save/conflict backups before removing worktree metadata.
-        fs::copy_tree(&metadata, &archive.join("git-metadata"))?;
-        let original = worktree.path().to_owned();
-        let archived_tree = archive.join("worktree");
-        // Move files into the archive; never recursively delete user saves.
-        fs::rename(&original, &archived_tree)?;
-        let mut options = git2::WorktreePruneOptions::new();
-        options.valid(false).locked(false).working_tree(false);
-        if let Err(error) = worktree.prune(Some(&mut options)) {
-            fs::rename(&archived_tree, &original)?;
-            return Err(error.into());
+    let mut delete_branch = || -> AdapterResult<()> {
+        if let Some(local) = local.as_mut() {
+            local.delete()?;
         }
-    }
-    // Unmerged independent histories may be removed because an archive ref pins the tip.
-    if let Some(local) = local.as_mut() {
-        local.delete()?;
+        Ok(())
+    };
+    if let Some((worktree, metadata)) = managed {
+        let original = worktree.path().to_owned();
+        drop(worktree);
+        archive_managed_tree(&original, &metadata, &archive, delete_branch)?;
+    } else {
+        delete_branch()?;
     }
     Ok(Some(archive))
 }
+/// Move whole directories on the same filesystem. Recursive prune can fail halfway
+/// through metadata deletion on Windows, leaving a profile that cannot be reopened.
+fn archive_managed_tree(
+    original: &Path,
+    metadata: &Path,
+    archive: &Path,
+    delete_branch: impl FnOnce() -> AdapterResult<()>,
+) -> AdapterResult<()> {
+    let archived_tree = archive.join("worktree");
+    let archived_metadata = archive.join("git-metadata");
+    fs::rename(original, &archived_tree)?;
+    if let Err(error) = fs::rename(metadata, &archived_metadata) {
+        if let Err(rollback) = fs::rename(&archived_tree, original) {
+            return Err(invalid(&format!(
+                "Archive registration: {error:?}; restore saves: {rollback:?}; archive={archive:?}"
+            )));
+        }
+        return Err(error);
+    }
+    // The registration is now outside .git/worktrees; no linked worktree pins the branch.
+    if let Err(error) = delete_branch() {
+        let restore_metadata = fs::rename(&archived_metadata, metadata);
+        let restore_tree = fs::rename(&archived_tree, original);
+        if restore_metadata.is_err() || restore_tree.is_err() {
+            return Err(invalid(&format!(
+                "Delete branch: {error:?}; restore registration: {restore_metadata:?}; restore saves: {restore_tree:?}; archive={archive:?}"
+            )));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn clean(repo: &Repository) -> AdapterResult<()> {
     if repo.state() != RepositoryState::Clean || !statuses(repo)?.is_empty() {
         return Err(invalid("Working tree must be clean"));
@@ -1424,6 +1452,42 @@ fn resolve_contents(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archive_failure_restores_both_worktree_and_registration() {
+        for fail_registration in [true, false] {
+            let dir =
+                std::env::temp_dir().join(format!("savehub-archive-{}", uuid::Uuid::new_v4()));
+            let tree = dir.join("tree");
+            let metadata = dir.join("registration");
+            let archive = dir.join("archive");
+            for path in [&tree, &metadata, &archive] {
+                std::fs::create_dir_all(path).unwrap();
+            }
+            std::fs::write(tree.join("save.dat"), b"latest save").unwrap();
+            std::fs::write(metadata.join("HEAD"), b"ref: refs/heads/test\n").unwrap();
+            if fail_registration {
+                std::fs::create_dir(archive.join("git-metadata")).unwrap();
+            }
+            let mut branch_called = false;
+            let result = super::archive_managed_tree(&tree, &metadata, &archive, || {
+                branch_called = true;
+                Err(super::invalid("Simulated branch deletion failure"))
+            });
+            assert!(result.is_err());
+            assert_eq!(branch_called, !fail_registration);
+            assert_eq!(
+                std::fs::read(tree.join("save.dat")).unwrap(),
+                b"latest save"
+            );
+            assert_eq!(
+                std::fs::read(metadata.join("HEAD")).unwrap(),
+                b"ref: refs/heads/test\n"
+            );
+            assert!(!archive.join("worktree").exists());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
     use super::*;
 
     #[test]
