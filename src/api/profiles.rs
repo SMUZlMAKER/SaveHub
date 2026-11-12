@@ -27,23 +27,27 @@ pub async fn current_profile(
     service: State<'_, Arc<ProfileService>>,
     saves: State<'_, Arc<crate::services::save::SaveService>>,
     operations: State<'_, Arc<std::sync::Mutex<()>>>,
+    trace_id: Option<String>,
 ) -> ApiResult<ProfileDto> {
-    let service = service.inner().clone();
-    let saves = saves.inner().clone();
-    let operations = operations.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = operations
-            .lock()
-            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
-        let profile = service
-            .active()?
-            .ok_or_else(|| ApiError::Rejected("Активный профиль не настроен".into()))?;
-        let mut dto = to_dto(&profile, true);
-        dto.games_count = saves.games_count(&profile.id)?;
-        Ok(dto)
+    crate::adapters::diagnostics::request(trace_id, "current_profile", async move {
+        let service = service.inner().clone();
+        let saves = saves.inner().clone();
+        let operations = operations.inner().clone();
+        crate::app::diagnostics::spawn_blocking(move || {
+            let _guard = operations
+                .lock()
+                .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+            let profile = service
+                .active()?
+                .ok_or_else(|| ApiError::Rejected("Активный профиль не настроен".into()))?;
+            let mut dto = to_dto(&profile, true);
+            dto.games_count = saves.games_count(&profile.id)?;
+            Ok(dto)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
     })
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?
 }
 
 #[tauri::command]
@@ -51,38 +55,49 @@ pub async fn list_profiles(
     service: State<'_, Arc<ProfileService>>,
     saves: State<'_, Arc<crate::services::save::SaveService>>,
     operations: State<'_, Arc<std::sync::Mutex<()>>>,
+    trace_id: Option<String>,
 ) -> ApiResult<Vec<ProfileDto>> {
-    let service = service.inner().clone();
-    let saves = saves.inner().clone();
-    let operations = operations.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = operations
-            .lock()
-            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
-        let active_id = service.active()?.map(|p| p.id);
-        service
-            .list()?
-            .into_iter()
-            .map(|profile| {
-                let mut dto = to_dto(&profile, active_id == Some(profile.id));
-                dto.games_count = saves.games_count(&profile.id)?;
-                Ok(dto)
-            })
-            .collect()
+    crate::adapters::diagnostics::request(trace_id, "list_profiles", async move {
+        let service = service.inner().clone();
+        let saves = saves.inner().clone();
+        let operations = operations.inner().clone();
+        crate::app::diagnostics::spawn_blocking(move || {
+            let _guard = operations
+                .lock()
+                .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+            let active_id = service.active()?.map(|p| p.id);
+            service
+                .list()?
+                .into_iter()
+                .map(|profile| {
+                    let mut dto = to_dto(&profile, active_id == Some(profile.id));
+                    dto.games_count = saves.games_count(&profile.id)?;
+                    Ok(dto)
+                })
+                .collect()
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
     })
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?
 }
 
 /// Переключить сохранения всех игр на профиль. Операция долгая, поэтому `async` — не блокирует окно.
 /// После успеха — событие `events::PROFILE_CHANGED` и обновить меню трея.
 #[tauri::command]
-pub async fn switch_profile(app: tauri::AppHandle, profile_id: ProfileId) -> ApiResult<()> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::app::actions::switch_profile(&app, profile_id)
+pub async fn switch_profile(
+    app: tauri::AppHandle,
+    profile_id: ProfileId,
+    trace_id: Option<String>,
+) -> ApiResult<()> {
+    crate::adapters::diagnostics::request(trace_id, "switch_profile", async move {
+        crate::app::diagnostics::spawn_blocking(move || {
+            crate::app::actions::switch_profile(&app, profile_id)
+        })
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?
     })
     .await
-    .map_err(|error| ApiError::Internal(error.to_string()))?
 }
 
 #[tauri::command]
@@ -90,14 +105,18 @@ pub async fn create_profile(
     app: tauri::AppHandle,
     name: String,
     service: State<'_, Arc<ProfileService>>,
+    trace_id: Option<String>,
 ) -> ApiResult<ProfileDto> {
-    let service = service.inner().clone();
-    let profile = tauri::async_runtime::spawn_blocking(move || service.create(&name))
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))??;
-    app.emit(PROFILE_CHANGED, ())
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-    Ok(to_dto(&profile, false))
+    crate::adapters::diagnostics::request(trace_id, "create_profile", async move {
+        let service = service.inner().clone();
+        let profile = crate::app::diagnostics::spawn_blocking(move || service.create(&name))
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))??;
+        app.emit(PROFILE_CHANGED, ())
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        Ok(to_dto(&profile, false))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -106,19 +125,34 @@ pub async fn delete_profile(
     profile_id: ProfileId,
     confirmed: bool,
     service: State<'_, Arc<ProfileService>>,
+    trace_id: Option<String>,
 ) -> ApiResult<()> {
-    if !confirmed {
-        return Err(ApiError::Rejected(
-            "Подтвердите удаление профиля и его ветки сохранений".into(),
-        ));
-    }
-    let service = service.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || service.delete(&profile_id))
+    crate::adapters::diagnostics::request(trace_id, "delete_profile", async move {
+        if !confirmed {
+            return Err(ApiError::Rejected(
+                "Подтвердите удаление профиля и его ветки сохранений".into(),
+            ));
+        }
+        let service = service.inner().clone();
+        crate::app::diagnostics::spawn_blocking(move || {
+            crate::adapters::diagnostics::event(
+                "delete_profile",
+                &format!("start profile={profile_id}"),
+            );
+            let result = service.delete(&profile_id);
+            crate::adapters::diagnostics::event(
+                "delete_profile",
+                &format!("finish profile={profile_id} success={}", result.is_ok()),
+            );
+            result
+        })
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))??;
-    app.emit(PROFILE_CHANGED, ())
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-    Ok(())
+        app.emit(PROFILE_CHANGED, ())
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        Ok(())
+    })
+    .await
 }
 
 fn to_dto(profile: &Profile, is_active: bool) -> ProfileDto {

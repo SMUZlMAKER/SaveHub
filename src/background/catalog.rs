@@ -86,7 +86,16 @@ pub fn spawn(app: tauri::AppHandle, service: Arc<GameService>) -> CatalogWorker 
             catalog::notify_status(&app);
             let previous_revision = service.revision();
             let working = service.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || working.sync_catalog()).await;
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                crate::adapters::diagnostics::request_sync(None, "catalog_sync", || {
+                    let result = working.sync_catalog();
+                    if let Err(error) = &result {
+                        crate::services::log_error(error);
+                    }
+                    result
+                })
+            })
+            .await;
             catalog::notify_changes(&app, &service, previous_revision);
             loop {
                 let delay = next_delay(service.status().state, &mut failures);

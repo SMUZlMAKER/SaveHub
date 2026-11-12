@@ -66,6 +66,7 @@ impl ProfileService {
 
     /// Создать профиль и его ветку; каталог игр общий.
     pub fn create(&self, name: &str) -> ServiceResult<Profile> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("profile.create");
         let _guard = self
             .operations
             .lock()
@@ -101,6 +102,7 @@ impl ProfileService {
 
     /// Переименовать без изменения идентификатора.
     pub fn rename(&self, profile_id: &ProfileId, name: &str) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("profile.rename");
         let _guard = self
             .operations
             .lock()
@@ -125,6 +127,7 @@ impl ProfileService {
 
     /// Запретить удаление активного профиля.
     pub fn delete(&self, profile_id: &ProfileId) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("profile.delete");
         let _guard = self
             .operations
             .lock()
@@ -179,6 +182,7 @@ impl ProfileService {
 
     /// Caller already holds the shared operations mutex.
     pub(crate) fn set_active_locked(&self, profile_id: &ProfileId) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("profile.set_active_locked");
         if !self.catalog.profiles().contains_key(profile_id) {
             return Err(ServiceError::NotFound("Профиль не найден".into()));
         }

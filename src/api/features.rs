@@ -14,13 +14,13 @@ pub struct AppFeatures {
 
 /// Enable a capability only when its complete user scenario is wired up.
 #[tauri::command]
-pub fn get_app_features() -> AppFeatures {
-    AppFeatures {
+pub fn get_app_features(trace_id: Option<String>) -> AppFeatures {
+    crate::adapters::diagnostics::request_sync(trace_id, "get_app_features", || AppFeatures {
         sync: true,
         profile_switch: true,
         save_history: true,
         conflicts: true,
         persistent_games: true,
         persistent_profiles: true,
-    }
+    })
 }

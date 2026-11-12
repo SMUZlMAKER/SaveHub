@@ -404,7 +404,20 @@ impl RepoWorkerLoop {
             return Ok(());
         }
 
-        let attempt = self.sync.execute(request);
+        let attempt = crate::adapters::diagnostics::request_sync(None, "repository_sync", || {
+            crate::adapters::diagnostics::event(
+                "sync_plan",
+                &format!(
+                    "checkpoint={} push={} fetch={}",
+                    request.checkpoint, request.push, request.fetch
+                ),
+            );
+            let result = self.sync.execute(request);
+            if let Err(error) = &result {
+                crate::services::log_error(error);
+            }
+            result
+        });
         let finished_at = Instant::now().max(now);
 
         match attempt {

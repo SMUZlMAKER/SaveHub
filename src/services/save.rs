@@ -183,6 +183,7 @@ impl SaveService {
         game: GameId,
         profile_id: ProfileId,
     ) -> ServiceResult<Option<Save>> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("save.capture_session");
         let _guard = self.lock()?;
         self.stopped(game)?;
         let profile = self.profile(&profile_id.to_string())?;
@@ -211,6 +212,7 @@ impl SaveService {
 
     /// Never change bindings or live files while the game is running.
     pub fn capture_manual(&self, game: GameId) -> ServiceResult<Save> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("save.capture_manual");
         let _guard = self.lock()?;
         let running = self
             .runtime
@@ -256,6 +258,7 @@ impl SaveService {
 
     /// Import only into the current profile; new profiles start empty.
     pub fn initialize(&self, game_id: GameId, profile_id: &str) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("save.initialize");
         let _guard = self.lock()?;
         self.initialize_inner(game_id, &self.profile(profile_id)?)
     }
@@ -298,6 +301,7 @@ impl SaveService {
 
     /// Preserve ordinary source directories beside the original path before linking.
     pub fn bind(&self, game_id: GameId, profile_id: &str) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("save.bind");
         let _guard = self.lock()?;
         let profile = self.profile(profile_id)?;
         self.initialize_inner(game_id, &profile)?;
@@ -340,6 +344,7 @@ impl SaveService {
 
     /// Detach into a real copy; the managed target and snapshots remain intact.
     pub fn unbind(&self, game_id: GameId) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("save.unbind");
         let _guard = self.lock()?;
         self.stopped(game_id)?;
         let source = self.source(game_id)?;
@@ -367,6 +372,7 @@ impl SaveService {
         profile_id: &str,
         kind: SaveKind,
     ) -> ServiceResult<Save> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("save.create_save");
         let _guard = self.lock()?;
         self.create_inner(game_id, &self.profile(profile_id)?, kind)
     }
@@ -506,6 +512,7 @@ impl SaveService {
 
     /// Restores only to its own active profile, with an unconditional BeforeRestore backup.
     pub fn apply_save(&self, save_id: &str) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("save.apply_save");
         let save = self.get_save(save_id)?;
         let _guard = self.lock()?;
         self.stopped(save.game_id)?;

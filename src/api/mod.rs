@@ -19,3 +19,5 @@ pub mod updates;
 pub mod launch;
 
 pub mod manual_saves;
+
+pub mod diagnostics;

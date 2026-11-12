@@ -54,21 +54,25 @@ pub async fn list_saves(
     game: GameId,
     service: State<'_, Arc<SaveService>>,
     operations: State<'_, Arc<Mutex<()>>>,
+    trace_id: Option<String>,
 ) -> ApiResult<Vec<SaveDto>> {
-    let service = service.inner().clone();
-    let operations = operations.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = operations
-            .lock()
-            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
-        Ok(service
-            .list(Some(game), None)?
-            .into_iter()
-            .map(save_dto)
-            .collect())
+    crate::adapters::diagnostics::request(trace_id, "list_saves", async move {
+        let service = service.inner().clone();
+        let operations = operations.inner().clone();
+        crate::app::diagnostics::spawn_blocking(move || {
+            let _guard = operations
+                .lock()
+                .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+            Ok(service
+                .list(Some(game), None)?
+                .into_iter()
+                .map(save_dto)
+                .collect())
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
     })
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?
 }
 
 /// POST /saves/{game}/choose
@@ -80,15 +84,19 @@ pub async fn choose_save(
     service: State<'_, Arc<SaveService>>,
     processes: State<'_, Arc<ProcessService>>,
     operations: State<'_, Arc<Mutex<()>>>,
+    trace_id: Option<String>,
 ) -> ApiResult<()> {
-    restore(
-        app,
-        Some(game),
-        choice.save_id,
-        service.inner().clone(),
-        processes.inner().clone(),
-        operations.inner().clone(),
-    )
+    crate::adapters::diagnostics::request(trace_id, "choose_save", async move {
+        restore(
+            app,
+            Some(game),
+            choice.save_id,
+            service.inner().clone(),
+            processes.inner().clone(),
+            operations.inner().clone(),
+        )
+        .await
+    })
     .await
 }
 
@@ -98,35 +106,39 @@ pub async fn get_save_conflict(
     game: GameId,
     repo: State<'_, Arc<crate::services::repo::RepoService>>,
     operations: State<'_, Arc<Mutex<()>>>,
+    trace_id: Option<String>,
 ) -> ApiResult<Option<SaveConflictDto>> {
-    let repo = repo.inner().clone();
-    let operations = operations.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = operations
-            .lock()
-            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
-        Ok(repo
-            .list_conflicts()?
-            .into_iter()
-            .find(|c| c.game_id == game)
-            .map(|c| {
-                let version = |v: crate::domain::SaveVersion| SaveDto {
-                    id: c.id.clone(),
-                    game_id: game.to_string(),
-                    profile_id: c.profile_id.to_string(),
-                    created_at: v.modified_at,
-                    size_bytes: v.size_bytes,
-                };
-                SaveConflictDto {
-                    local: version(c.local),
-                    remote: version(c.remote),
-                    id: c.id,
-                    game_id: game.to_string(),
-                }
-            }))
+    crate::adapters::diagnostics::request(trace_id, "get_save_conflict", async move {
+        let repo = repo.inner().clone();
+        let operations = operations.inner().clone();
+        crate::app::diagnostics::spawn_blocking(move || {
+            let _guard = operations
+                .lock()
+                .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+            Ok(repo
+                .list_conflicts()?
+                .into_iter()
+                .find(|c| c.game_id == game)
+                .map(|c| {
+                    let version = |v: crate::domain::SaveVersion| SaveDto {
+                        id: c.id.clone(),
+                        game_id: game.to_string(),
+                        profile_id: c.profile_id.to_string(),
+                        created_at: v.modified_at,
+                        size_bytes: v.size_bytes,
+                    };
+                    SaveConflictDto {
+                        local: version(c.local),
+                        remote: version(c.remote),
+                        id: c.id,
+                        game_id: game.to_string(),
+                    }
+                }))
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
     })
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?
 }
 
 #[tauri::command]
@@ -138,20 +150,24 @@ pub async fn resolve_save_conflict(
     repo: State<'_, Arc<crate::services::repo::RepoService>>,
     processes: State<'_, Arc<ProcessService>>,
     operations: State<'_, Arc<Mutex<()>>>,
+    trace_id: Option<String>,
 ) -> ApiResult<()> {
-    let resolution = match resolution {
-        SaveConflictResolution::KeepLocal => crate::domain::ConflictResolution::KeepLocal,
-        SaveConflictResolution::KeepRemote => crate::domain::ConflictResolution::KeepRemote,
-    };
-    super::sync::resolve(
-        app,
-        Some(game),
-        conflict_id,
-        resolution,
-        repo.inner().clone(),
-        processes.inner().clone(),
-        operations.inner().clone(),
-    )
+    crate::adapters::diagnostics::request(trace_id, "resolve_save_conflict", async move {
+        let resolution = match resolution {
+            SaveConflictResolution::KeepLocal => crate::domain::ConflictResolution::KeepLocal,
+            SaveConflictResolution::KeepRemote => crate::domain::ConflictResolution::KeepRemote,
+        };
+        super::sync::resolve(
+            app,
+            Some(game),
+            conflict_id,
+            resolution,
+            repo.inner().clone(),
+            processes.inner().clone(),
+            operations.inner().clone(),
+        )
+        .await
+    })
     .await
 }
 
@@ -204,49 +220,53 @@ pub async fn list_save_history(
     service: State<'_, Arc<SaveService>>,
     catalog: State<'_, Arc<Catalog>>,
     operations: State<'_, Arc<Mutex<()>>>,
+    trace_id: Option<String>,
 ) -> ApiResult<Vec<SaveHistoryEntryDto>> {
-    let service = service.inner().clone();
-    let catalog = catalog.inner().clone();
-    let operations = operations.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = operations
-            .lock()
-            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
-        let games = catalog.games();
-        let profiles = catalog.profiles();
-        Ok(service
-            .list(game_id, None)?
-            .into_iter()
-            .map(|save| SaveHistoryEntryDto {
-                session_id: save.session_id,
-                session_started_at: save.session_started_at,
-                session_ended_at: save.session_ended_at,
-                profile_id: save.profile_id,
-                id: save.id,
-                game_id: save.game_id.to_string(),
-                game_name: games
-                    .get(&save.game_id)
-                    .map(|g| g.name.clone())
-                    .unwrap_or_else(|| save.game_id.to_string()),
-                profile_name: profiles
-                    .get(&save.profile_id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| save.profile_id.to_string()),
-                kind: match save.kind {
-                    crate::domain::SaveKind::BeforeSwitch => SaveKind::BeforeSwitch,
-                    crate::domain::SaveKind::AfterSession => SaveKind::AfterSession,
-                    crate::domain::SaveKind::Conflict => SaveKind::Conflict,
-                    crate::domain::SaveKind::BeforeRestore => SaveKind::BeforeRestore,
-                    crate::domain::SaveKind::FileChanged => SaveKind::FileChanged,
-                    crate::domain::SaveKind::Manual => SaveKind::Manual,
-                },
-                created_at: save.created_at,
-                size_bytes: save.size_bytes,
-            })
-            .collect())
+    crate::adapters::diagnostics::request(trace_id, "list_save_history", async move {
+        let service = service.inner().clone();
+        let catalog = catalog.inner().clone();
+        let operations = operations.inner().clone();
+        crate::app::diagnostics::spawn_blocking(move || {
+            let _guard = operations
+                .lock()
+                .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+            let games = catalog.games();
+            let profiles = catalog.profiles();
+            Ok(service
+                .list(game_id, None)?
+                .into_iter()
+                .map(|save| SaveHistoryEntryDto {
+                    session_id: save.session_id,
+                    session_started_at: save.session_started_at,
+                    session_ended_at: save.session_ended_at,
+                    profile_id: save.profile_id,
+                    id: save.id,
+                    game_id: save.game_id.to_string(),
+                    game_name: games
+                        .get(&save.game_id)
+                        .map(|g| g.name.clone())
+                        .unwrap_or_else(|| save.game_id.to_string()),
+                    profile_name: profiles
+                        .get(&save.profile_id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| save.profile_id.to_string()),
+                    kind: match save.kind {
+                        crate::domain::SaveKind::BeforeSwitch => SaveKind::BeforeSwitch,
+                        crate::domain::SaveKind::AfterSession => SaveKind::AfterSession,
+                        crate::domain::SaveKind::Conflict => SaveKind::Conflict,
+                        crate::domain::SaveKind::BeforeRestore => SaveKind::BeforeRestore,
+                        crate::domain::SaveKind::FileChanged => SaveKind::FileChanged,
+                        crate::domain::SaveKind::Manual => SaveKind::Manual,
+                    },
+                    created_at: save.created_at,
+                    size_bytes: save.size_bytes,
+                })
+                .collect())
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
     })
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?
 }
 
 #[tauri::command]
@@ -256,15 +276,19 @@ pub async fn restore_save(
     service: State<'_, Arc<SaveService>>,
     processes: State<'_, Arc<ProcessService>>,
     operations: State<'_, Arc<Mutex<()>>>,
+    trace_id: Option<String>,
 ) -> ApiResult<()> {
-    restore(
-        app,
-        None,
-        save_id,
-        service.inner().clone(),
-        processes.inner().clone(),
-        operations.inner().clone(),
-    )
+    crate::adapters::diagnostics::request(trace_id, "restore_save", async move {
+        restore(
+            app,
+            None,
+            save_id,
+            service.inner().clone(),
+            processes.inner().clone(),
+            operations.inner().clone(),
+        )
+        .await
+    })
     .await
 }
 
@@ -276,7 +300,7 @@ async fn restore(
     processes: Arc<ProcessService>,
     operations: Arc<Mutex<()>>,
 ) -> ApiResult<()> {
-    let result = tauri::async_runtime::spawn_blocking(move || -> ApiResult<()> {
+    let result = crate::app::diagnostics::spawn_blocking(move || -> ApiResult<()> {
         let _guard = operations
             .lock()
             .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;

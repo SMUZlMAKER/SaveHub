@@ -104,6 +104,7 @@ impl ProcessService {
     }
 
     pub fn launch(&self, game_id: GameId) -> ServiceResult<u32> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("process.launch");
         let _guard = self.operation.lock().unwrap();
         self.refresh()?;
         if self
@@ -142,6 +143,7 @@ impl ProcessService {
     /// Persist only a local launch registration. Does not publish or modify saves.
     /// It lets the shortcut work after SaveHub restarts, while the main catalog is in memory.
     pub fn create_shortcut(&self, game_id: GameId, registrations: &Path) -> ServiceResult<PathBuf> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("process.create_shortcut");
         if !cfg!(windows) {
             return Err(ServiceError::InvalidInput(
                 "Ярлыки .lnk поддерживаются только в Windows".into(),
@@ -187,6 +189,8 @@ impl ProcessService {
     }
 
     pub fn restore_registration(&self, game_id: GameId, registrations: &Path) -> ServiceResult<()> {
+        let _diagnostic_span =
+            crate::adapters::diagnostics::Span::new("process.restore_registration");
         if self.catalog.games().contains_key(&game_id) {
             return Ok(());
         }

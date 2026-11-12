@@ -1,6 +1,7 @@
 // Единственное место, где фронт вызывает Rust. Экраны импортируют `api`, а не `invoke`.
 // Имя ручки = имя функции с #[tauri::command] в src/api/*.rs.
 
+import { recordDiagnostic, requestTrace } from "./diagnostics";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createSubscription, type Subscription } from "./subscription";
@@ -43,9 +44,17 @@ async function call<T>(
   command: string,
   args?: Record<string, unknown>,
 ): Promise<T> {
+  const traceId = requestTrace();
+  const started = performance.now();
+  const quiet = command.startsWith("get_") || command.startsWith("list_") || command === "current_profile";
   try {
-    return await invoke<T>(command, args);
+    const result = await invoke<T>(command, { ...args, traceId });
+    if (!quiet) recordDiagnostic({ traceId, action: command, phase: 'success', elapsedMs: Math.round(performance.now() - started) });
+    return result;
   } catch (e) {
+    const kind = e && typeof e === 'object' && 'kind' in e ? e.kind : 'unknown';
+    const errorKind = kind === 'internal' || kind === 'rejected' || kind === 'notImplemented' ? kind : 'unknown';
+    recordDiagnostic({ traceId, action: command, phase: 'error', errorKind, elapsedMs: Math.round(performance.now() - started) });
     if (e && typeof e === "object" && "kind" in e && "message" in e) {
       throw new BackendError(e.kind as ApiErrorKind, String(e.message));
     }

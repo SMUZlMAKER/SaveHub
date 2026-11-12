@@ -34,27 +34,33 @@ pub enum SyncState {
 #[tauri::command]
 pub fn get_sync_status(
     runtime: tauri::State<'_, std::sync::Arc<crate::domain::RuntimeState>>,
+    trace_id: Option<String>,
 ) -> ApiResult<SyncStatusDto> {
-    let status = runtime.sync_status();
-    let state = match status.state {
-        crate::domain::SyncState::NotConfigured => SyncState::NotConfigured,
-        crate::domain::SyncState::Idle => SyncState::Idle,
-        crate::domain::SyncState::Syncing => SyncState::Syncing,
-        crate::domain::SyncState::Error => SyncState::Error,
-    };
+    crate::adapters::diagnostics::request_sync(trace_id, "get_sync_status", || {
+        let status = runtime.sync_status();
+        let state = match status.state {
+            crate::domain::SyncState::NotConfigured => SyncState::NotConfigured,
+            crate::domain::SyncState::Idle => SyncState::Idle,
+            crate::domain::SyncState::Syncing => SyncState::Syncing,
+            crate::domain::SyncState::Error => SyncState::Error,
+        };
 
-    Ok(SyncStatusDto {
-        state,
-        last_sync_at: status.last_sync_at,
-        error: status.error,
+        Ok(SyncStatusDto {
+            state,
+            last_sync_at: status.last_sync_at,
+            error: status.error,
+        })
     })
 }
 
 #[tauri::command]
-pub async fn sync_now(app: tauri::AppHandle) -> ApiResult<()> {
-    tauri::async_runtime::spawn_blocking(move || crate::app::actions::sync_now(&app))
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))?
+pub async fn sync_now(app: tauri::AppHandle, trace_id: Option<String>) -> ApiResult<()> {
+    crate::adapters::diagnostics::request(trace_id, "sync_now", async move {
+        crate::app::diagnostics::spawn_blocking(move || crate::app::actions::sync_now(&app))
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?
+    })
+    .await
 }
 
 #[derive(Debug, Serialize)]
@@ -115,69 +121,73 @@ pub async fn list_conflicts(
     repo: State<'_, Arc<RepoService>>,
     catalog: State<'_, Arc<Catalog>>,
     operations: State<'_, Arc<Mutex<()>>>,
+    trace_id: Option<String>,
 ) -> ApiResult<Vec<ConflictDto>> {
-    let repo = repo.inner().clone();
-    let catalog = catalog.inner().clone();
-    let operations = operations.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = operations
-            .lock()
-            .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
-        let games = catalog.games();
-        let profiles = catalog.profiles();
-        Ok(repo
-            .list_conflicts()?
-            .into_iter()
-            .map(|c| {
-                let profile = profiles.get(&c.profile_id);
-                let game_root = std::path::Path::new("games").join(c.game_id.to_string());
-                let file_path = c
-                    .file_path
-                    .strip_prefix(&game_root)
-                    .unwrap_or(&c.file_path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                ConflictDto {
-                    id: c.id,
-                    game_id: c.game_id.to_string(),
-                    game_name: games
-                        .get(&c.game_id)
-                        .map(|g| g.name.clone())
-                        .unwrap_or_else(|| c.game_id.to_string()),
-                    profile_id: c.profile_id.to_string(),
-                    profile_name: profile
-                        .map(|profile| profile.name.clone())
-                        .unwrap_or_else(|| c.profile_id.to_string()),
-                    profile_branch: profile
-                        .map(|profile| profile.branch.clone())
-                        .unwrap_or_else(|| "неизвестна".into()),
-                    file_path,
-                    local: SaveVersionDto {
-                        machine_name: c.local.machine_id,
-                        modified_at: c.local.modified_at,
-                        size_bytes: c.local.size_bytes,
-                    },
-                    remote: SaveVersionDto {
-                        machine_name: c.remote.machine_id,
-                        modified_at: c.remote.modified_at,
-                        size_bytes: c.remote.size_bytes,
-                    },
-                    local_commit: ConflictCommitDto {
-                        id: c.local_commit.id,
-                        committed_at: c.local_commit.committed_at,
-                        summary: c.local_commit.summary,
-                    },
-                    remote_commit: ConflictCommitDto {
-                        id: c.remote_commit.id,
-                        committed_at: c.remote_commit.committed_at,
-                        summary: c.remote_commit.summary,
-                    },
-                }
-            })
-            .collect())
+    crate::adapters::diagnostics::request(trace_id, "list_conflicts", async move {
+        let repo = repo.inner().clone();
+        let catalog = catalog.inner().clone();
+        let operations = operations.inner().clone();
+        crate::app::diagnostics::spawn_blocking(move || {
+            let _guard = operations
+                .lock()
+                .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;
+            let games = catalog.games();
+            let profiles = catalog.profiles();
+            Ok(repo
+                .list_conflicts()?
+                .into_iter()
+                .map(|c| {
+                    let profile = profiles.get(&c.profile_id);
+                    let game_root = std::path::Path::new("games").join(c.game_id.to_string());
+                    let file_path = c
+                        .file_path
+                        .strip_prefix(&game_root)
+                        .unwrap_or(&c.file_path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    ConflictDto {
+                        id: c.id,
+                        game_id: c.game_id.to_string(),
+                        game_name: games
+                            .get(&c.game_id)
+                            .map(|g| g.name.clone())
+                            .unwrap_or_else(|| c.game_id.to_string()),
+                        profile_id: c.profile_id.to_string(),
+                        profile_name: profile
+                            .map(|profile| profile.name.clone())
+                            .unwrap_or_else(|| c.profile_id.to_string()),
+                        profile_branch: profile
+                            .map(|profile| profile.branch.clone())
+                            .unwrap_or_else(|| "неизвестна".into()),
+                        file_path,
+                        local: SaveVersionDto {
+                            machine_name: c.local.machine_id,
+                            modified_at: c.local.modified_at,
+                            size_bytes: c.local.size_bytes,
+                        },
+                        remote: SaveVersionDto {
+                            machine_name: c.remote.machine_id,
+                            modified_at: c.remote.modified_at,
+                            size_bytes: c.remote.size_bytes,
+                        },
+                        local_commit: ConflictCommitDto {
+                            id: c.local_commit.id,
+                            committed_at: c.local_commit.committed_at,
+                            summary: c.local_commit.summary,
+                        },
+                        remote_commit: ConflictCommitDto {
+                            id: c.remote_commit.id,
+                            committed_at: c.remote_commit.committed_at,
+                            summary: c.remote_commit.summary,
+                        },
+                    }
+                })
+                .collect())
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
     })
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?
 }
 
 #[tauri::command]
@@ -188,16 +198,20 @@ pub async fn resolve_conflict(
     repo: State<'_, Arc<RepoService>>,
     processes: State<'_, Arc<ProcessService>>,
     operations: State<'_, Arc<Mutex<()>>>,
+    trace_id: Option<String>,
 ) -> ApiResult<()> {
-    resolve(
-        app,
-        None,
-        conflict_id,
-        resolution.into(),
-        repo.inner().clone(),
-        processes.inner().clone(),
-        operations.inner().clone(),
-    )
+    crate::adapters::diagnostics::request(trace_id, "resolve_conflict", async move {
+        resolve(
+            app,
+            None,
+            conflict_id,
+            resolution.into(),
+            repo.inner().clone(),
+            processes.inner().clone(),
+            operations.inner().clone(),
+        )
+        .await
+    })
     .await
 }
 
@@ -210,7 +224,7 @@ pub(super) async fn resolve(
     processes: Arc<ProcessService>,
     operations: Arc<Mutex<()>>,
 ) -> ApiResult<()> {
-    let result = tauri::async_runtime::spawn_blocking(move || -> ApiResult<()> {
+    let result = crate::app::diagnostics::spawn_blocking(move || -> ApiResult<()> {
         let _guard = operations
             .lock()
             .map_err(|_| ApiError::Internal("Блокировка операций повреждена".into()))?;

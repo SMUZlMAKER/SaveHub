@@ -67,6 +67,8 @@ impl LaunchGame {
         profile_id: ProfileId,
         proceed: impl FnOnce() -> bool,
     ) -> ServiceResult<u32> {
+        let _diagnostic_span =
+            crate::adapters::diagnostics::Span::new("launch_game.execute_guarded");
         self.execute_guarded_with_refresh(game_id, profile_id, true, proceed)
     }
 

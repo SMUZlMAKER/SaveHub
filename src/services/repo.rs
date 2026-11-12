@@ -294,6 +294,7 @@ impl RepoService {
 
     /// Архивировать локальные данные профиля и отметить его GitHub-ветку для удаления.
     pub fn delete_profile(&self, profile_id: &ProfileId) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("repo.delete_profile");
         let _guard = self.lock()?;
         let profile = self.profile(&profile_id.to_string())?;
         if self.runtime.active_profile() == Some(*profile_id) {
@@ -522,6 +523,7 @@ impl RepoService {
     }
     /// Existing files and repositories are never replaced by a clone.
     pub fn connect(&self) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("repo.connect");
         let _guard = self.lock()?;
         let (path, url) = self.repository()?;
         if !fs::exists(&path.join(".git")).map_err(ServiceError::Adapter)? {
@@ -531,6 +533,7 @@ impl RepoService {
     }
     /// Profile metadata has its own branch; GameService owns the separate games repository.
     pub fn sync_catalog(&self) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("repo.sync_catalog");
         let _guard = self.lock()?;
         self.network(|root, token| self.sync_catalog_at(root, token))
     }
@@ -853,6 +856,7 @@ impl RepoService {
     }
     /// Fetch only; never change working saves.
     pub fn fetch(&self) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("repo.fetch");
         let _guard = self.lock()?;
         self.network(|root, token| git::fetch(root, "origin", token).map_err(ServiceError::Adapter))
     }
@@ -891,6 +895,8 @@ impl RepoService {
     }
     /// Apply fetched updates only after checking processes and preserving files.
     pub fn apply_profile_updates(&self, profile_id: &str) -> ServiceResult<Vec<Conflict>> {
+        let _diagnostic_span =
+            crate::adapters::diagnostics::Span::new("repo.apply_profile_updates");
         let _guard = self.lock()?;
         self.stopped()?;
         let profile = self.profile(profile_id)?;
@@ -919,6 +925,7 @@ impl RepoService {
     }
     /// Prepare the persistent profile tree; the workflow binds saves and activates it.
     pub fn checkout_profile(&self, profile_id: &str) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("repo.checkout_profile");
         let _guard = self.lock()?;
         self.stopped()?;
         let profile = self.profile(profile_id)?;
@@ -959,6 +966,7 @@ impl RepoService {
             .map_err(ServiceError::Adapter)
     }
     pub fn checkpoint(&self, profile_id: &str, message: &str) -> ServiceResult<Option<CommitId>> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("repo.checkpoint");
         let _guard = self.lock()?;
         self.stopped()?;
         if message.trim().is_empty() {
@@ -976,6 +984,7 @@ impl RepoService {
     }
     /// Retrying publication never creates another checkpoint.
     pub fn push(&self, profile_id: &str) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("repo.push");
         let _guard = self.lock()?;
         let profile = self.profile(profile_id)?;
         let path = self.tree(&profile)?;
@@ -1073,6 +1082,7 @@ impl RepoService {
         conflict_id: &str,
         resolution: ConflictResolution,
     ) -> ServiceResult<()> {
+        let _diagnostic_span = crate::adapters::diagnostics::Span::new("repo.resolve_conflict");
         self.resolve_conflict_with_publisher(
             conflict_id,
             resolution,

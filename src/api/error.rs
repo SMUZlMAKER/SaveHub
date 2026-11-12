@@ -17,6 +17,7 @@ pub enum ApiError {
 
 impl From<crate::services::ServiceError> for ApiError {
     fn from(error: crate::services::ServiceError) -> Self {
+        crate::services::log_error(&error);
         match error {
             crate::services::ServiceError::NotFound(message)
             | crate::services::ServiceError::InvalidInput(message)

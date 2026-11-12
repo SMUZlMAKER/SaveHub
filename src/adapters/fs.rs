@@ -8,6 +8,14 @@ use std::{
 };
 
 fn io_error(path: &Path, error: io::Error) -> AdapterError {
+    super::diagnostics::event(
+        "filesystem_error",
+        &format!(
+            "path={path:?} kind={:?} os_code={:?}",
+            error.kind(),
+            error.raw_os_error()
+        ),
+    );
     #[cfg(windows)]
     if matches!(error.raw_os_error(), Some(32 | 33)) {
         return AdapterError::FileLocked(path.to_owned());
@@ -76,6 +84,8 @@ pub fn trees_equal(left: &Path, right: &Path) -> AdapterResult<bool> {
 
 /// Replace a directory link with an ordinary copy, preserving the target and old link.
 pub fn detach_directory_link(source: &Path) -> AdapterResult<()> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("fs.detach_directory_link");
+    super::diagnostics::event("fs_paths", &format!("source={source:?}"));
     if read_symlink(source)?.is_none() {
         return Ok(());
     }
@@ -155,6 +165,11 @@ pub fn require_plain_path(root: &Path, path: &Path) -> AdapterResult<()> {
 /// Publish a prepared directory, retaining the old path on disk. Roll back on failure.
 /// The staged directory must be a sibling so both renames stay on one filesystem.
 pub fn replace_directory(destination: &Path, staged: &Path) -> AdapterResult<PathBuf> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("fs.replace_directory");
+    super::diagnostics::event(
+        "fs_paths",
+        &format!("destination={destination:?} staged={staged:?}"),
+    );
     if staged.parent() != destination.parent() {
         return Err(invalid("Staging must be beside destination"));
     }
@@ -304,6 +319,11 @@ fn replace(source: &Path, destination: &Path) -> AdapterResult<()> {
 /// An explicitly supplied junction root is followed; nested links are rejected.
 /// A failed copy is left in place so callers can inspect the incomplete backup.
 pub fn copy_tree(source: &Path, destination: &Path) -> AdapterResult<()> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("fs.copy_tree");
+    super::diagnostics::event(
+        "fs_paths",
+        &format!("source={source:?} destination={destination:?}"),
+    );
     let source = fs::canonicalize(source).map_err(|error| io_error(source, error))?;
     if !is_directory(&source)? {
         return Err(invalid("Source must be a directory"));
@@ -395,6 +415,11 @@ pub fn remove_file(path: &Path) -> AdapterResult<()> {
 }
 
 pub fn rename(source: &Path, destination: &Path) -> AdapterResult<()> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("fs.rename");
+    super::diagnostics::event(
+        "fs_paths",
+        &format!("source={source:?} destination={destination:?}"),
+    );
     require_missing(destination)?;
     fs::rename(source, destination).map_err(|error| io_error(source, error))
 }
@@ -455,6 +480,8 @@ fn collect_tree(root: &Path, entries: &mut Vec<(PathBuf, fs::Metadata)>) -> Adap
 /// Create a directory junction on Windows (a directory symlink on Unix).
 /// The target must exist; an existing link or ordinary directory is never replaced.
 pub fn create_symlink(link: &Path, target: &Path) -> AdapterResult<()> {
+    let _diagnostic_span = crate::adapters::diagnostics::Span::new("fs.create_symlink");
+    super::diagnostics::event("fs_paths", &format!("link={link:?} target={target:?}"));
     require_missing(link)?;
     let target = fs::canonicalize(target).map_err(|error| io_error(target, error))?;
     if !is_directory(&target)? {

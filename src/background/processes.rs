@@ -36,6 +36,7 @@ pub fn spawn(app: tauri::AppHandle) {
                                 runtime.acknowledge_session(game, profile);
                             }
                             Err(error) => {
+                                crate::services::log_error(&error);
                                 let mut status = runtime.sync_status();
                                 status.state = crate::domain::SyncState::Error;
                                 status.error = Some(format!(
@@ -107,6 +108,10 @@ pub fn spawn(app: tauri::AppHandle) {
                             GameProcessEvent::Started(id) => (id, "started"),
                             GameProcessEvent::Stopped(id) => (id, "stopped"),
                         };
+                        crate::adapters::diagnostics::event(
+                            "game_process",
+                            &format!("game={game_id} state={state}"),
+                        );
                         let _ = app.emit(
                             events::GAME_PROCESS_CHANGED,
                             GameProcessDto {
@@ -121,6 +126,7 @@ pub fn spawn(app: tauri::AppHandle) {
                 }
                 Err(error) => {
                     if publish_poll_state(previous_poll, false) {
+                        crate::services::log_error(&error);
                         app.state::<Launches>().monitor_status(
                             &app,
                             Some(format!("Не удалось опросить процессы: {error:?}")),
