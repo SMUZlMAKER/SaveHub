@@ -19,6 +19,11 @@ pub struct ProcessService {
     children: Mutex<HashMap<GameId, Child>>,
 }
 
+pub trait ProcessMonitor: Send + Sync {
+    fn refresh_running_games(&self) -> ServiceResult<Vec<crate::domain::GameProcessEvent>>;
+    fn running_games(&self) -> Option<Vec<crate::domain::GameId>>;
+}
+
 impl ProcessService {
     pub fn new(catalog: Arc<Catalog>, runtime: Arc<RuntimeState>, settings: Arc<Settings>) -> Self {
         Self {
@@ -245,6 +250,16 @@ fn shortcut_filename(name: &str) -> String {
         "{} — SaveHub.lnk",
         if clean.is_empty() { "Игра" } else { clean }
     )
+}
+
+impl ProcessMonitor for ProcessService {
+    fn refresh_running_games(&self) -> ServiceResult<Vec<GameProcessEvent>> {
+        ProcessService::refresh_running_games(self)
+    }
+
+    fn running_games(&self) -> Option<Vec<GameId>> {
+        ProcessService::running_games(self)
+    }
 }
 
 #[cfg(test)]

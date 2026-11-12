@@ -76,6 +76,7 @@ pub async fn update_settings(
 
 #[tauri::command]
 pub async fn connect_repository(
+    app: tauri::AppHandle,
     repo: State<'_, Arc<crate::services::repo::RepoService>>,
     worker: State<'_, RepoWorkerHandle>,
     operations: State<'_, Arc<std::sync::Mutex<()>>>,
@@ -89,6 +90,8 @@ pub async fn connect_repository(
     })
     .await
     .map_err(|error| ApiError::Internal(error.to_string()))??;
+    use tauri::Emitter;
+    let _ = app.emit(crate::api::events::PROFILE_CHANGED, ());
     worker.wake()?;
     Ok(())
 }

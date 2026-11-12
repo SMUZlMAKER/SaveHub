@@ -53,6 +53,7 @@ pub fn start() {
             api::launch::create_game_shortcut,
             api::launch::begin_game_launch,
             api::launch::confirm_game_launch,
+            api::launch::confirm_local_game_launch,
             api::launch::cancel_game_launch,
             api::games::list_games,
             api::games::get_catalog_status,

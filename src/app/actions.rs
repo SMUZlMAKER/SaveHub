@@ -63,6 +63,7 @@ pub fn sync_now(app: &tauri::AppHandle) -> ApiResult<()> {
         });
     for event in [
         crate::api::events::SYNC_STATUS_CHANGED,
+        crate::api::events::PROFILE_CHANGED,
         crate::api::events::CONFLICTS_CHANGED,
         crate::api::events::SAVES_CHANGED,
     ] {

@@ -20,7 +20,10 @@ impl From<crate::services::ServiceError> for ApiError {
         match error {
             crate::services::ServiceError::NotFound(message)
             | crate::services::ServiceError::InvalidInput(message)
-            | crate::services::ServiceError::Conflict(message) => ApiError::Rejected(message),
+            | crate::services::ServiceError::Conflict(message)
+            | crate::services::ServiceError::RemoteUnavailable(message) => {
+                ApiError::Rejected(message)
+            }
             crate::services::ServiceError::GameRunning(games) => {
                 ApiError::Rejected(format!("Идут игры: {games:?}, переключение недоступно"))
             }

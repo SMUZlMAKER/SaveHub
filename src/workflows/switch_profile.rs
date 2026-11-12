@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::domain::ProfileId;
 use crate::services::{
-    ServiceResult, game::GameService, process::ProcessService, profile::ProfileService,
+    ServiceResult, game::GameService, process::ProcessMonitor, profile::ProfileService,
     repo::RepoService, save::SaveService,
 };
 
@@ -11,7 +11,7 @@ pub struct SwitchProfile {
     profiles: Arc<ProfileService>,
     saves: Arc<SaveService>,
     repo: Arc<RepoService>,
-    processes: Arc<ProcessService>,
+    processes: Arc<dyn ProcessMonitor>,
     operations: Arc<Mutex<()>>,
 }
 
@@ -22,7 +22,7 @@ impl SwitchProfile {
         profiles: Arc<ProfileService>,
         saves: Arc<SaveService>,
         repo: Arc<RepoService>,
-        processes: Arc<ProcessService>,
+        processes: Arc<dyn ProcessMonitor>,
         operations: Arc<Mutex<()>>,
     ) -> Self {
         Self {
@@ -150,7 +150,9 @@ impl SwitchProfile {
         self.repo
             .checkpoint(&profile.id.to_string(), "SaveHub: before game launch")?;
         if self.repo.configuration().is_some() {
-            self.repo.fetch()?;
+            self.repo.fetch().map_err(|error| {
+                crate::services::ServiceError::RemoteUnavailable(format!("{error:?}"))
+            })?;
             if !self
                 .repo
                 .apply_profile_updates(&profile.id.to_string())?
@@ -173,6 +175,20 @@ mod tests {
         domain::*,
     };
     use std::{collections::HashMap, path::PathBuf};
+
+    struct IdleProcessMonitor(Arc<RuntimeState>);
+
+    impl crate::services::process::ProcessMonitor for IdleProcessMonitor {
+        fn refresh_running_games(&self) -> crate::services::ServiceResult<Vec<GameProcessEvent>> {
+            self.0.set_running_games(Vec::new());
+            Ok(Vec::new())
+        }
+
+        fn running_games(&self) -> Option<Vec<GameId>> {
+            self.0.running_games()
+        }
+    }
+
     struct Fixture {
         dir: PathBuf,
         source: PathBuf,
@@ -279,7 +295,7 @@ mod tests {
                     settings.clone(),
                 )),
                 repo,
-                Arc::new(ProcessService::new(catalog, runtime.clone(), settings)),
+                Arc::new(IdleProcessMonitor(runtime.clone())),
                 operations,
             );
             Self {

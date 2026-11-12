@@ -334,12 +334,7 @@ impl RepoService {
         if !fs::exists(&path.join(".git")).map_err(ServiceError::Adapter)? {
             git::clone(&url, &path, &self.token()?).map_err(ServiceError::Adapter)?;
         }
-        self.network(|root, token| {
-            git::fetch(root, "origin", token).map_err(ServiceError::Adapter)?;
-            git::prepare_worktree(root, CATALOG_BRANCH, "catalog")
-                .map_err(ServiceError::Adapter)?;
-            Ok(())
-        })
+        self.network(|root, token| self.sync_catalog_at(root, token))
     }
     /// Profile metadata has its own branch; GameService owns the separate games repository.
     pub fn sync_catalog(&self) -> ServiceResult<()> {
@@ -396,6 +391,10 @@ impl RepoService {
         let profiles = config::read_profiles(&path.join("profiles.json"))
             .map_err(ServiceError::Adapter)?
             .unwrap_or_default();
+        if let Some(directory) = &self.persistence {
+            config::write_profiles(&directory.join("profiles.json"), &profiles)
+                .map_err(ServiceError::Adapter)?;
+        }
         *baseline = Some(serde_json::json!({"profiles": profiles}));
         self.catalog.replace_profiles(profiles);
         git::push(
@@ -643,7 +642,7 @@ impl RepoService {
         self.resolve_conflict_with_publisher(
             conflict_id,
             resolution,
-            |profile, path, expected_remote| {
+            |profile, path, expected_remote, commit| {
                 let branch = profile.branch.clone();
                 let expected_remote = expected_remote.to_owned();
                 self.network(|root, token| {
@@ -657,10 +656,12 @@ impl RepoService {
                                 .into(),
                         ));
                     }
-                    git::push(
+                    git::push_with_lease(
                         root,
                         "origin",
-                        &format!("+refs/heads/{0}:refs/heads/{0}", branch),
+                        &branch,
+                        expected_remote.as_str(),
+                        commit,
                         token,
                     )
                     .map_err(ServiceError::Adapter)
@@ -689,7 +690,7 @@ impl RepoService {
         &self,
         conflict_id: &str,
         resolution: ConflictResolution,
-        publish_local: impl FnOnce(&Profile, &Path, &str) -> ServiceResult<()>,
+        publish_local: impl FnOnce(&Profile, &Path, &str, &str) -> ServiceResult<()>,
     ) -> ServiceResult<()> {
         let _guard = self.lock()?;
         self.stopped()?;
@@ -704,10 +705,19 @@ impl RepoService {
         let (_, remote_commit) = git::merge_commits(&path).map_err(ServiceError::Adapter)?;
         git::backup_worktree(&path).map_err(ServiceError::Adapter)?;
         let keep_remote = matches!(&resolution, ConflictResolution::KeepRemote);
-        if !keep_remote {
-            publish_local(&profile, &path, &remote_commit.id)?;
+        let local_resolution = if keep_remote {
+            None
+        } else {
+            Some(
+                git::create_local_resolution_commit(&path, &remote_commit.id)
+                    .map_err(ServiceError::Adapter)?,
+            )
+        };
+        if let Some(commit) = &local_resolution {
+            publish_local(&profile, &path, &remote_commit.id, commit)?;
         }
-        git::select_merge_commit(&path, keep_remote).map_err(ServiceError::Adapter)?;
+        git::select_merge_commit(&path, keep_remote, local_resolution.as_deref())
+            .map_err(ServiceError::Adapter)?;
         self.runtime.replace_conflicts(
             self.runtime
                 .conflicts()
@@ -1155,7 +1165,7 @@ mod tests {
                 .resolve_conflict_with_publisher(
                     &conflicts[0].id,
                     resolution,
-                    |profile, _, expected_remote| {
+                    |profile, _, expected_remote, commit| {
                         if remote_first {
                             return Ok(());
                         }
@@ -1163,10 +1173,12 @@ mod tests {
                             git::remote_head(&root, &profile.branch).unwrap().as_deref(),
                             Some(expected_remote)
                         );
-                        git::push(
+                        git::push_with_lease(
                             &root,
                             "origin",
-                            &format!("+refs/heads/{0}:refs/heads/{0}", profile.branch),
+                            &profile.branch,
+                            expected_remote,
+                            commit,
                             "",
                         )
                         .map_err(ServiceError::Adapter)
@@ -1174,12 +1186,27 @@ mod tests {
                 )
                 .unwrap();
             assert!(fixture.service.list_conflicts().unwrap().is_empty());
-            let expected_commit = if remote_first {
+            let selected_commit = if remote_first {
                 &conflicts[0].remote_commit.id
             } else {
                 &conflicts[0].local_commit.id
             };
-            assert_eq!(git::head(&fixture.tree()).unwrap(), *expected_commit);
+            let (head_id, parents) = {
+                let repository = git2::Repository::open(fixture.tree()).unwrap();
+                let head = repository.head().unwrap().peel_to_commit().unwrap();
+                (
+                    head.id().to_string(),
+                    head.parent_ids()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>(),
+                )
+            };
+            if remote_first {
+                assert_eq!(head_id, *selected_commit);
+            } else {
+                assert!(parents.contains(selected_commit));
+                assert!(parents.contains(&conflicts[0].remote_commit.id));
+            }
             assert_eq!(
                 fs::read(&fixture.tree().join(fixture.save_path())).unwrap(),
                 if remote_first {
@@ -1229,7 +1256,7 @@ mod tests {
                     .target()
                     .unwrap()
                     .to_string(),
-                *expected_commit
+                head_id
             );
             assert!(
                 std::fs::read_dir(repository.path().join("savehub-backups"))
@@ -1312,6 +1339,53 @@ mod tests {
         assert_eq!(
             fixture.service.catalog.games()[&fixture.game.id].name,
             fixture.game.name
+        );
+    }
+
+    #[test]
+    fn catalog_sync_imports_remote_profiles_and_persists_them_locally() {
+        let mut fixture = Fixture::new();
+        let persistence = fixture.dir.join("local-data");
+        fixture.service.persistence = Some(persistence.clone());
+        let remote_profile = Profile {
+            id: uuid::Uuid::new_v4(),
+            name: "Remote profile".into(),
+            branch: "profiles/remote".into(),
+            last_played_game: None,
+        };
+        let profiles = serde_json::to_vec(&[remote_profile.clone()]).unwrap();
+        let commit = git::commit_files(
+            &fixture.root,
+            None,
+            &[("profiles.json", &profiles)],
+            "Publish shared profile",
+        )
+        .unwrap();
+        git::push(
+            &fixture.root,
+            "origin",
+            &format!("{commit}:refs/heads/{CATALOG_BRANCH}"),
+            "",
+        )
+        .unwrap();
+
+        fixture.service.sync_catalog_at(&fixture.root, "").unwrap();
+
+        assert!(
+            fixture
+                .service
+                .catalog
+                .profiles()
+                .get(&remote_profile.id)
+                .is_some_and(|profile| profile.name == remote_profile.name
+                    && profile.branch == remote_profile.branch)
+        );
+        assert!(
+            config::read_profiles(&persistence.join("profiles.json"))
+                .unwrap()
+                .unwrap()
+                .iter()
+                .any(|profile| profile.id == remote_profile.id)
         );
     }
 
@@ -1522,6 +1596,9 @@ pub trait RepoOperations: Send + Sync + 'static {
     fn checkpoint(&self, profile: &ProfileId) -> ServiceResult<Option<CommitId>>;
     fn push(&self, profile: &ProfileId) -> ServiceResult<()>;
     fn fetch(&self) -> ServiceResult<()>;
+    fn sync_catalog(&self) -> ServiceResult<()> {
+        self.fetch()
+    }
     fn has_unpushed_commits(&self, profile: &ProfileId) -> ServiceResult<bool>;
     /// Fetch and merge the cached remote head into one stopped profile worktree.
     fn apply_profile_updates(&self, profile: &ProfileId) -> ServiceResult<bool>;
@@ -1576,5 +1653,9 @@ impl RepoOperations for RepoService {
 
     fn fetch(&self) -> ServiceResult<()> {
         self.fetch()
+    }
+
+    fn sync_catalog(&self) -> ServiceResult<()> {
+        RepoService::sync_catalog(self)
     }
 }

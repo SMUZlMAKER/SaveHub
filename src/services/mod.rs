@@ -7,6 +7,7 @@ pub enum ServiceError {
     GameRunning(Vec<crate::domain::GameId>),
     ProcessesUnknown,
     Conflict(String),
+    RemoteUnavailable(String),
     Adapter(crate::adapters::AdapterError),
 }
 pub mod game;

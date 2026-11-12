@@ -73,6 +73,7 @@ export const api = {
   createGameShortcut: (gameId: string) => call<Shortcut>("create_game_shortcut", { gameId }),
   beginGameLaunch: (gameId: string) => call<LaunchStatus>("begin_game_launch", { gameId }),
   confirmGameLaunch: (requestId: string, profileId: string) => call<LaunchStatus>("confirm_game_launch", { requestId, profileId }),
+  confirmLocalGameLaunch: (requestId: string) => call<LaunchStatus>("confirm_local_game_launch", { requestId }),
   cancelGameLaunch: (requestId: string) => call<void>("cancel_game_launch", { requestId }),
   getAppPreferences: () => call<AppPreferences>("get_app_preferences"),
   saveAppPreferences: (preferences: AppPreferences) =>

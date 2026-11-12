@@ -1,6 +1,6 @@
 use crate::{
     domain::{Catalog, RuntimeState, SyncState, SyncStatus},
-    services::{ServiceError, ServiceResult, process::ProcessService, repo::RepoOperations},
+    services::{ServiceError, ServiceResult, process::ProcessMonitor, repo::RepoOperations},
 };
 use std::{
     sync::{Arc, Mutex},
@@ -11,7 +11,7 @@ pub struct ManualSync {
     repo: Arc<dyn RepoOperations>,
     catalog: Arc<Catalog>,
     runtime: Arc<RuntimeState>,
-    processes: Arc<ProcessService>,
+    processes: Arc<dyn ProcessMonitor>,
     operations: Arc<Mutex<()>>,
 }
 
@@ -20,7 +20,7 @@ impl ManualSync {
         repo: Arc<dyn RepoOperations>,
         catalog: Arc<Catalog>,
         runtime: Arc<RuntimeState>,
-        processes: Arc<ProcessService>,
+        processes: Arc<dyn ProcessMonitor>,
         operations: Arc<Mutex<()>>,
     ) -> Self {
         Self {
@@ -78,7 +78,7 @@ impl ManualSync {
             self.repo.checkpoint(&profile)?;
         }
 
-        self.repo.fetch()?;
+        self.repo.sync_catalog()?;
         self.set_status(SyncState::Syncing, None, None);
 
         let mut profiles: Vec<_> = self.catalog.profiles().into_values().collect();
@@ -129,11 +129,26 @@ mod tests {
     };
     use std::{collections::HashMap, sync::Mutex};
 
+    struct IdleProcessMonitor(Arc<RuntimeState>);
+
+    impl crate::services::process::ProcessMonitor for IdleProcessMonitor {
+        fn refresh_running_games(&self) -> ServiceResult<Vec<crate::domain::GameProcessEvent>> {
+            self.0.set_running_games(Vec::new());
+            Ok(Vec::new())
+        }
+
+        fn running_games(&self) -> Option<Vec<crate::domain::GameId>> {
+            self.0.running_games()
+        }
+    }
+
     #[derive(Default)]
     struct FakeRepo {
         calls: Mutex<Vec<String>>,
         dirty: Mutex<bool>,
         conflict: Mutex<bool>,
+        catalog: Mutex<Option<Arc<Catalog>>>,
+        synced_profile: Mutex<Option<Profile>>,
     }
 
     impl FakeRepo {
@@ -162,6 +177,17 @@ mod tests {
 
         fn fetch(&self) -> ServiceResult<()> {
             self.record("fetch".into());
+            Ok(())
+        }
+
+        fn sync_catalog(&self) -> ServiceResult<()> {
+            self.record("sync_catalog".into());
+            if let (Some(catalog), Some(profile)) = (
+                self.catalog.lock().unwrap().as_ref(),
+                self.synced_profile.lock().unwrap().clone(),
+            ) {
+                catalog.add_profile(profile);
+            }
             Ok(())
         }
 
@@ -198,28 +224,9 @@ mod tests {
                 error: None,
             },
         ));
-        let settings = Arc::new(crate::domain::Settings::new(
-            crate::domain::SettingsData {
-                catalog_repo_url: None,
-                repo_url: None,
-                local_repo_path: None,
-                sync_after_session: true,
-                sync_while_gaming: false,
-                auto_switch_profile: false,
-                ask_profile_before_launch: true,
-                start_minimized: false,
-            },
-            crate::domain::LocalConfig {
-                machine_id: "test".into(),
-                games: HashMap::new(),
-            },
-        ));
-        let processes = Arc::new(ProcessService::new(
-            catalog.clone(),
-            runtime.clone(),
-            settings,
-        ));
+        let processes = Arc::new(IdleProcessMonitor(runtime.clone()));
         let repo = Arc::new(FakeRepo::default());
+        *repo.catalog.lock().unwrap() = Some(catalog.clone());
         let workflow = ManualSync::new(
             repo.clone(),
             catalog,
@@ -241,7 +248,7 @@ mod tests {
             *repo.calls.lock().unwrap(),
             [
                 format!("checkpoint:{id}"),
-                "fetch".into(),
+                "sync_catalog".into(),
                 format!("apply:{id}"),
                 format!("unpushed:{id}"),
                 format!("push:{id}"),
@@ -262,10 +269,39 @@ mod tests {
             *repo.calls.lock().unwrap(),
             [
                 format!("checkpoint:{id}"),
-                "fetch".into(),
+                "sync_catalog".into(),
                 format!("apply:{id}"),
             ]
         );
         assert!(matches!(runtime.sync_status().state, SyncState::Error));
+    }
+
+    #[test]
+    fn manual_sync_processes_profiles_imported_from_the_shared_catalog() {
+        let (workflow, repo, _, local_id) = setup();
+        let remote_profile = Profile {
+            id: uuid::Uuid::from_u128(2),
+            name: "Remote".into(),
+            branch: "profiles/remote".into(),
+            last_played_game: None,
+        };
+        *repo.synced_profile.lock().unwrap() = Some(remote_profile.clone());
+
+        workflow.execute().unwrap();
+
+        let calls = repo.calls.lock().unwrap();
+        let sync_catalog = calls
+            .iter()
+            .position(|call| call == "sync_catalog")
+            .unwrap();
+        let apply_local = calls
+            .iter()
+            .position(|call| call == &format!("apply:{local_id}"))
+            .unwrap();
+        let apply_remote = calls
+            .iter()
+            .position(|call| call == &format!("apply:{}", remote_profile.id))
+            .unwrap();
+        assert!(sync_catalog < apply_local && sync_catalog < apply_remote);
     }
 }
