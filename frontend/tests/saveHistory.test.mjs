@@ -46,3 +46,25 @@ test('active sessions and legacy groups use their latest snapshot date', () => {
   const saves = [save('legacy', { createdAt: 10 }), save('active', { sessionId: 'active', createdAt: 30 }), save('completed', { sessionId: 'completed', sessionEndedAt: 20, createdAt: 40 })]
   assert.deepEqual(groupHistory(saves, 'session', 'newest').map(group => group.key), ['active', 'completed', 'unknown'])
 })
+
+test('session period takes earliest start and latest end regardless of snapshot order', () => {
+  const rows = [
+    save('middle', { sessionId: 'session', createdAt: 20, sessionStartedAt: 1000, sessionEndedAt: 3000 }),
+    save('start', { sessionId: 'session', createdAt: 10, sessionStartedAt: 0, sessionEndedAt: null }),
+    save('end', { sessionId: 'session', createdAt: 30, sessionStartedAt: null, sessionEndedAt: 4000 }),
+  ]
+  const expected = `${new Date(0).toLocaleString('ru-RU')} — ${new Date(4000).toLocaleString('ru-RU')}`
+  for (const input of [rows, [...rows].reverse(), [rows[2], rows[0], rows[1]]]) {
+    assert.equal(sessionPeriod(input), expected)
+    for (const order of ['newest', 'oldest']) {
+      const [group] = groupHistory(input, 'session', order)
+      assert.equal(group.period, expected)
+      assert.equal(group.date, 4000)
+    }
+  }
+})
+test('missing session bounds preserve unknown and active session labels', () => {
+  assert.equal(sessionPeriod([save('unknown')]), 'Период игры неизвестен')
+  const rows = [save('later', { sessionStartedAt: 1000 }), save('earlier', { sessionStartedAt: 0 })]
+  assert.equal(sessionPeriod(rows), `${new Date(0).toLocaleString('ru-RU')} — сессия ещё не завершена`)
+})

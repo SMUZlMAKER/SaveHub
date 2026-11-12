@@ -27,9 +27,17 @@ function localDay(time: number) {
   const date = new Date(time)
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
+function sessionBounds(saves: SaveHistoryEntry[]) {
+  let start: number | null = null
+  let end: number | null = null
+  for (const save of saves) {
+    if (save.sessionStartedAt != null) start = Math.min(start ?? save.sessionStartedAt, save.sessionStartedAt)
+    if (save.sessionEndedAt != null) end = Math.max(end ?? save.sessionEndedAt, save.sessionEndedAt)
+  }
+  return { start, end }
+}
 export function sessionPeriod(saves: SaveHistoryEntry[]) {
-  const start = saves.find(save => save.sessionStartedAt != null)?.sessionStartedAt
-  const end = saves.find(save => save.sessionEndedAt != null)?.sessionEndedAt
+  const { start, end } = sessionBounds(saves)
   if (start == null) return 'Период игры неизвестен'
   const format = (time: number) => new Date(time).toLocaleString('ru-RU')
   return `${format(start)} — ${end == null ? 'сессия ещё не завершена' : format(end)}`
@@ -57,8 +65,8 @@ export function groupHistory(saves: SaveHistoryEntry[], grouping: Grouping, orde
   for (const group of groups.values()) {
     if (grouping === 'session' && group.key !== 'unknown') {
       group.period = sessionPeriod(group.saves)
-      const ends = group.saves.flatMap(save => save.sessionEndedAt == null ? [] : [save.sessionEndedAt])
-      if (ends.length) group.date = Math.max(...ends)
+      const { end } = sessionBounds(group.saves)
+      if (end != null) group.date = end
     }
   }
   return [...groups.values()].sort((a, b) => direction * (a.date - b.date || a.key.localeCompare(b.key)))
