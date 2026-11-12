@@ -1,12 +1,13 @@
 <script lang="ts">
+  import ManualSaveSettings from '../lib/components/ManualSaveSettings.svelte'
   import AppUpdates from '../lib/components/AppUpdates.svelte'
-  import { onMount } from 'svelte'
+  import { onMount, tick } from 'svelte'
   import { api, describeError } from '../lib/api'
   import { notice } from '../lib/notice.svelte'
   import type { AppFeatures, Settings } from '../lib/types'
   import Loadable from '../lib/components/Loadable.svelte'
 
-  let { features }: { features: AppFeatures } = $props()
+  let { features, target }: { features: AppFeatures; target?: 'repository' | 'token' } = $props()
   let saving = $state(false)
   let savingToken = $state(false)
   let saveError = $state('')
@@ -91,11 +92,22 @@
   }
 
   onMount(load)
+  $effect(() => {
+    if (!loading && settings && target) {
+      const id = target
+      tick().then(() => {
+        const input = document.getElementById(`settings-${id}`)
+        input?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        input?.focus({ preventScroll: true })
+      })
+    }
+  })
 </script>
 
 <h2>Настройки</h2>
 
 <AppUpdates />
+<ManualSaveSettings />
 
 {#if loadError}<button onclick={load}>Повторить загрузку настроек</button>{/if}
 <Loadable {loading} error={loadError}>
@@ -110,7 +122,7 @@
       </label>
       <label class="field">
         <span class="muted">Локальная копия репозитория</span>
-        <div class="inline-form"><input class="grow" bind:value={settings.localRepoPath} /><button type="button" onclick={pickRepo} disabled={pickingRepo || saving || savingToken}>{pickingRepo ? 'Выбор…' : 'Обзор…'}</button></div>
+        <div class="inline-form"><input id="settings-repository" class="grow" bind:value={settings.localRepoPath} /><button type="button" onclick={pickRepo} disabled={pickingRepo || saving || savingToken}>{pickingRepo ? 'Выбор…' : 'Обзор…'}</button></div>
       </label>
 
       <p class="muted">Укажите абсолютный путь к существующей папке. Для GitHub пустая папка используется для клона, существующие файлы не заменяются. Без GitHub SaveHub автоматически создаст Git-репозиторий в выбранной папке, если его там ещё нет.</p>
@@ -155,7 +167,7 @@
       {settings.hasGithubToken ? 'Токен сохранён. Новый заменит старый.' : 'Токен ещё не сохранён.'}
     </p>
     <form class="inline-form" onsubmit={saveToken} aria-busy={savingToken}>
-      <input class="grow" aria-label="Токен GitHub" disabled={saving || savingToken} type="password" bind:value={token} placeholder="ghp_…" autocomplete="off" />
+      <input id="settings-token" class="grow" aria-label="Токен GitHub" disabled={saving || savingToken} type="password" bind:value={token} placeholder={settings.hasGithubToken ? '******' : 'ghp_…'} autocomplete="off" />
       <button disabled={!token.trim() || saving || savingToken}>{savingToken ? 'Сохраняем…' : 'Сохранить токен'}</button>
     </form>
     {#if tokenError}<p class="error" role="alert">{tokenError}</p>{/if}

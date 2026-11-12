@@ -4,7 +4,7 @@
 //! git и сохранениями должна быть вынесена в SaveService и адаптеры.
 
 use crate::{
-    domain::{Catalog, GameId},
+    domain::{Catalog, GameId, ProfileId},
     services::{process::ProcessService, save::SaveService},
 };
 use serde::{Deserialize, Serialize};
@@ -158,6 +158,10 @@ pub async fn resolve_save_conflict(
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveHistoryEntryDto {
+    pub session_id: Option<uuid::Uuid>,
+    pub session_started_at: Option<u64>,
+    pub session_ended_at: Option<u64>,
+    pub profile_id: ProfileId,
     pub id: String,
     pub game_id: String,
     pub game_name: String,
@@ -181,6 +185,7 @@ pub enum SaveKind {
     /// Текущее состояние перед откатом.
     BeforeRestore,
     FileChanged,
+    Manual,
 }
 
 fn save_dto(save: crate::domain::Save) -> SaveDto {
@@ -213,6 +218,10 @@ pub async fn list_save_history(
             .list(game_id, None)?
             .into_iter()
             .map(|save| SaveHistoryEntryDto {
+                session_id: save.session_id,
+                session_started_at: save.session_started_at,
+                session_ended_at: save.session_ended_at,
+                profile_id: save.profile_id,
                 id: save.id,
                 game_id: save.game_id.to_string(),
                 game_name: games
@@ -229,6 +238,7 @@ pub async fn list_save_history(
                     crate::domain::SaveKind::Conflict => SaveKind::Conflict,
                     crate::domain::SaveKind::BeforeRestore => SaveKind::BeforeRestore,
                     crate::domain::SaveKind::FileChanged => SaveKind::FileChanged,
+                    crate::domain::SaveKind::Manual => SaveKind::Manual,
                 },
                 created_at: save.created_at,
                 size_bytes: save.size_bytes,

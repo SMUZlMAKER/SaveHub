@@ -63,13 +63,17 @@ export type SaveKind =
   | "afterSession"
   | "conflict"
   | "beforeRestore"
-  | "fileChanged";
+  | "fileChanged"
+  | "manual";
 
 export interface SaveHistoryEntry {
+  sessionId: string | null;
+  sessionStartedAt: number | null;
+  sessionEndedAt: number | null;
+  profileId: string;
   id: string;
   gameId: string;
   gameName: string;
-  profileId: string;
   profileName: string;
   kind: SaveKind;
   /** Unix-время, мс */
@@ -195,3 +199,6 @@ export interface GameProcessEvent {
   pid: number | null;
   error: string | null;
 }
+
+export interface ManualSavePreferences { shortcut: string; error: string | null }
+export interface ManualSaveStatus { sequence: number; success: boolean; message: string }
