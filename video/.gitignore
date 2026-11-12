@@ -1,0 +1,11 @@
+node_modules/
+out/
+public/blender/
+public/blender-v2/
+public/blender-v3/
+blender/*.blend1
+*.log
+
+# локальные скрипты съёмки (AutoHotkey)
+shoot/
+public/blender-claude/
