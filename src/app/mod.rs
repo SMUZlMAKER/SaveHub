@@ -7,3 +7,5 @@ pub mod launch;
 pub mod catalog;
 
 pub mod actions;
+
+pub mod manual_saves;

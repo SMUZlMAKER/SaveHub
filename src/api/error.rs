@@ -27,6 +27,12 @@ impl From<crate::services::ServiceError> for ApiError {
             crate::services::ServiceError::ProcessesUnknown => {
                 ApiError::Rejected("Состояние процессов неизвестно".into())
             }
+            crate::services::ServiceError::Adapter(crate::adapters::AdapterError::FileLocked(
+                _,
+            )) => ApiError::Rejected(
+                "Файлы сохранений заняты игрой. Дождитесь завершения записи и повторите операцию"
+                    .into(),
+            ),
             crate::services::ServiceError::Adapter(error) => {
                 ApiError::Internal(format!("Ошибка адаптера: {error:?}"))
             }

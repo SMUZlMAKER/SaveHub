@@ -17,3 +17,5 @@ pub use error::{ApiError, ApiResult};
 pub mod updates;
 
 pub mod launch;
+
+pub mod manual_saves;

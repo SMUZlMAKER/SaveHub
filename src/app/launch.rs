@@ -90,7 +90,7 @@ fn error_message(error: &ApiError) -> String {
 }
 
 pub async fn begin(app: &tauri::AppHandle, game_id: GameId) -> ApiResult<LaunchStatus> {
-    begin_internal(app, game_id, false).await
+    begin_internal(app, game_id, true).await
 }
 async fn begin_internal(
     app: &tauri::AppHandle,
@@ -125,6 +125,7 @@ async fn begin_internal(
         status.phase = "error".into();
         status.error = Some(error_message(error));
         state.publish(app, status);
+        show_dialog(app)?;
     }
     result
 }

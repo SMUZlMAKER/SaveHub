@@ -156,7 +156,7 @@ fn build_menu(app: &AppHandle, view: &TrayView) -> tauri::Result<Menu<Wry>> {
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     for (id, label, enabled) in [
         ("sync", view.sync_label, view.sync_enabled),
-        ("saves", "Сохранения и откат…", true),
+        ("saves", "Сохранения…", true),
         ("settings", "Настройки…", true),
     ] {
         menu.append(&MenuItem::with_id(app, id, label, enabled, None::<&str>)?)?;

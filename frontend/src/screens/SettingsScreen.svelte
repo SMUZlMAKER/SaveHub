@@ -1,12 +1,13 @@
 <script lang="ts">
+  import ManualSaveSettings from '../lib/components/ManualSaveSettings.svelte'
   import AppUpdates from '../lib/components/AppUpdates.svelte'
-  import { onMount } from 'svelte'
+  import { onMount, tick } from 'svelte'
   import { api, describeError } from '../lib/api'
   import { notice } from '../lib/notice.svelte'
   import type { AppFeatures, Settings } from '../lib/types'
   import Loadable from '../lib/components/Loadable.svelte'
 
-  let { features }: { features: AppFeatures } = $props()
+  let { features, target }: { features: AppFeatures; target?: 'repository' | 'token' } = $props()
   let saving = $state(false)
   let savingToken = $state(false)
   let saveError = $state('')
@@ -65,11 +66,22 @@
   }
 
   onMount(load)
+  $effect(() => {
+    if (!loading && settings && target) {
+      const id = target
+      tick().then(() => {
+        const input = document.getElementById(`settings-${id}`)
+        input?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        input?.focus({ preventScroll: true })
+      })
+    }
+  })
 </script>
 
 <h2>Настройки</h2>
 
 <AppUpdates />
+<ManualSaveSettings />
 
 {#if loadError}<button onclick={load}>Повторить загрузку настроек</button>{/if}
 <Loadable {loading} error={loadError}>
@@ -85,7 +97,7 @@
       <label class="field">
         <span class="muted">Локальная копия репозитория</span>
         <!-- TODO(frontend): добавить кнопку «Обзор…» для выбора папки через системный диалог Проводника. -->
-        <input bind:value={settings.localRepoPath} />
+        <input id="settings-repository" bind:value={settings.localRepoPath} />
       </label>
 
       <p class="muted">Укажите абсолютный путь к уже созданному Git-репозиторию. Автоматическое клонирование пока недоступно; для локальных профилей адрес GitHub необязателен.</p>
@@ -124,7 +136,7 @@
       {settings.hasGithubToken ? 'Токен сохранён. Новый заменит старый.' : 'Токен ещё не сохранён.'}
     </p>
     <form class="inline-form" onsubmit={saveToken} aria-busy={savingToken}>
-      <input class="grow" aria-label="Токен GitHub" disabled={saving || savingToken} type="password" bind:value={token} placeholder="ghp_…" autocomplete="off" />
+      <input id="settings-token" class="grow" aria-label="Токен GitHub" disabled={saving || savingToken} type="password" bind:value={token} placeholder={settings.hasGithubToken ? '******' : 'ghp_…'} autocomplete="off" />
       <button disabled={!token.trim() || saving || savingToken}>{savingToken ? 'Сохраняем…' : 'Сохранить токен'}</button>
     </form>
     {#if tokenError}<p class="error" role="alert">{tokenError}</p>{/if}

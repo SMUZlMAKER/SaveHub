@@ -1,6 +1,6 @@
 [package]
 name = "savehub"
-version = "0.7.3"
+version = "0.8.0"
 edition = "2024"
 
 [build-dependencies]
@@ -32,4 +32,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
     "Win32_UI_Shell",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
 ] }
