@@ -852,9 +852,16 @@ pub fn archive_profile_branch(
     for name in repo.worktrees()?.iter() {
         let name = name?.ok_or_else(|| invalid("Non-UTF-8 worktree name"))?;
         let worktree = repo.find_worktree(name)?;
-        let tree = Repository::open(worktree.path())?;
+        // Read HEAD from registered metadata first. An unrelated worktree may have
+        // been moved or removed; its missing directory must not block this deletion.
+        let tree = Repository::open(repo.commondir().join("worktrees").join(name))?;
         if tree.head()?.name().ok() != Some(reference.as_str()) {
             continue;
+        }
+        // The selected profile must still be a valid worktree before archiving it.
+        let tree = Repository::open(worktree.path())?;
+        if tree.head()?.name().ok() != Some(reference.as_str()) {
+            return Err(invalid("Unexpected worktree branch"));
         }
         if managed.is_some()
             || fs::read_symlink(&expected)?.is_some()

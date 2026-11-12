@@ -357,6 +357,57 @@ mod tests {
     }
 
     #[test]
+    fn deletion_ignores_another_profiles_missing_worktree() {
+        for missing_directory in [true, false] {
+            let fixture = Fixture::new();
+            fixture.service.runtime.set_running_games(Vec::new());
+            let other = fixture.service.create("Moved saves").unwrap();
+            let other_tree = crate::adapters::git::prepare_worktree(
+                &fixture.root,
+                &other.branch,
+                &other.id.to_string(),
+            )
+            .unwrap();
+            std::fs::write(other_tree.join("save.dat"), b"keep other saves").unwrap();
+            let moved = fixture.root.join("moved-tree");
+            if missing_directory {
+                std::fs::rename(&other_tree, &moved).unwrap();
+            } else {
+                std::fs::rename(other_tree.join(".git"), &moved).unwrap();
+            }
+            let profile = fixture.service.create("Delete me").unwrap();
+            crate::adapters::git::prepare_worktree(
+                &fixture.root,
+                &profile.branch,
+                &profile.id.to_string(),
+            )
+            .unwrap();
+            fixture.service.delete(&profile.id).unwrap();
+            assert!(fixture.service.get(&profile.id).is_err());
+            assert!(fixture.service.get(&other.id).is_ok());
+            assert_eq!(
+                std::fs::read(
+                    if missing_directory {
+                        &moved
+                    } else {
+                        &other_tree
+                    }
+                    .join("save.dat")
+                )
+                .unwrap(),
+                b"keep other saves"
+            );
+            let repository = git2::Repository::open(&fixture.root).unwrap();
+            assert_eq!(repository.worktrees().unwrap().len(), 1);
+            assert!(
+                repository
+                    .find_branch(&other.branch, git2::BranchType::Local)
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
     fn deletion_archives_worktree_with_uncommitted_saves_and_previous_backups() {
         let fixture = Fixture::new();
         fixture.service.runtime.set_running_games(Vec::new());
