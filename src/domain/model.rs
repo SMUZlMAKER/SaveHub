@@ -53,8 +53,22 @@ pub enum SaveKind {
     FileChanged,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct GameSession {
+    pub id: uuid::Uuid,
+    pub started_at: u64,
+    pub ended_at: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Save {
+    /// Отсутствует у снимков, созданных до появления учёта сессий.
+    #[serde(default)]
+    pub session_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub session_started_at: Option<u64>,
+    #[serde(default)]
+    pub session_ended_at: Option<u64>,
     pub id: SaveId,
     pub game_id: GameId,
     pub profile_id: ProfileId,

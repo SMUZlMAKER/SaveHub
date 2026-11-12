@@ -96,7 +96,8 @@ pub struct RuntimeState {
 struct RuntimeStateInner {
     active_profile: Option<ProfileId>,
     running_games: Option<Vec<GameId>>,
-    pending_sessions: Vec<(GameId, ProfileId)>,
+    pending_sessions: Vec<(GameId, ProfileId, GameSession)>,
+    active_sessions: HashMap<GameId, (ProfileId, GameSession)>,
     conflicts: Vec<Conflict>,
     sync_status: SyncStatus,
 }
@@ -124,21 +125,37 @@ impl RuntimeStateInner {
                 unique.push(game);
             }
         }
-        let previous = self.running_games.as_deref().unwrap_or_default();
+        let mut previous = self.running_games.clone().unwrap_or_default();
+        for game in self.active_sessions.keys() {
+            if !previous.contains(game) {
+                previous.push(*game);
+            }
+        }
         let mut events = Vec::new();
-        for game in previous {
+        for game in &previous {
             if !unique.contains(game) {
                 events.push(GameProcessEvent::Stopped(*game));
-                if let Some(profile) = self.active_profile {
-                    if !self.pending_sessions.contains(&(*game, profile)) {
-                        self.pending_sessions.push((*game, profile));
-                    }
+                if let Some((profile, mut session)) = self.active_sessions.remove(game) {
+                    session.ended_at = Some(session_time());
+                    self.pending_sessions.push((*game, profile, session));
                 }
             }
         }
         for game in &unique {
             if !previous.contains(game) {
                 events.push(GameProcessEvent::Started(*game));
+                if let Some(profile) = self.active_profile {
+                    self.active_sessions.entry(*game).or_insert_with(|| {
+                        (
+                            profile,
+                            GameSession {
+                                id: uuid::Uuid::new_v4(),
+                                started_at: session_time(),
+                                ended_at: None,
+                            },
+                        )
+                    });
+                }
             }
         }
         self.running_games = Some(unique);
@@ -176,6 +193,7 @@ impl RuntimeState {
                 active_profile,
                 running_games: None,
                 pending_sessions: Vec::new(),
+                active_sessions: HashMap::new(),
                 conflicts,
                 sync_status,
             }),
@@ -223,15 +241,39 @@ impl RuntimeState {
             .read()
             .expect("RuntimeState lock poisoned")
             .pending_sessions
-            .clone()
+            .iter()
+            .map(|(game, profile, _)| (*game, *profile))
+            .collect()
+    }
+
+    pub fn session(&self, game: GameId) -> Option<GameSession> {
+        self.inner
+            .read()
+            .expect("RuntimeState lock poisoned")
+            .active_sessions
+            .get(&game)
+            .map(|(_, id)| *id)
+    }
+
+    pub fn pending_session(&self, game: GameId, profile: ProfileId) -> Option<GameSession> {
+        self.inner
+            .read()
+            .expect("RuntimeState lock poisoned")
+            .pending_sessions
+            .iter()
+            .find(|(g, p, _)| *g == game && *p == profile)
+            .map(|(_, _, id)| *id)
     }
 
     pub fn acknowledge_session(&self, game: GameId, profile: ProfileId) {
-        self.inner
-            .write()
-            .expect("RuntimeState lock poisoned")
+        let mut inner = self.inner.write().expect("RuntimeState lock poisoned");
+        if let Some(index) = inner
             .pending_sessions
-            .retain(|item| *item != (game, profile));
+            .iter()
+            .position(|(g, p, _)| *g == game && *p == profile)
+        {
+            inner.pending_sessions.remove(index);
+        }
     }
 
     pub fn conflicts(&self) -> Vec<Conflict> {
@@ -481,6 +523,28 @@ mod tests {
         assert_eq!(runtime.active_profile(), Some(next_profile));
     }
     #[test]
+    fn repeated_sessions_keep_distinct_ids_and_periods_across_poll_failures() {
+        let runtime = runtime();
+        let game = uuid::Uuid::new_v4();
+        let profile = runtime.active_profile().unwrap();
+        runtime.set_running_games(vec![game]);
+        let first = runtime.session(game).unwrap();
+        runtime.invalidate_process_state();
+        runtime.set_running_games(vec![game]);
+        assert_eq!(runtime.session(game).unwrap().id, first.id);
+        runtime.invalidate_process_state();
+        runtime.set_running_games(vec![]);
+        let completed = runtime.pending_session(game, profile).unwrap();
+        assert!(completed.ended_at.unwrap() >= completed.started_at);
+        runtime.set_running_games(vec![game]);
+        assert_ne!(runtime.session(game).unwrap().id, first.id);
+        runtime.set_running_games(vec![]);
+        assert_eq!(runtime.pending_sessions().len(), 2);
+        runtime.acknowledge_session(game, profile);
+        assert_ne!(runtime.pending_session(game, profile).unwrap().id, first.id);
+    }
+
+    #[test]
     fn foreground_process_checks_do_not_consume_pending_session_snapshots() {
         let runtime = runtime();
         let profile = runtime.active_profile().unwrap();
@@ -495,4 +559,11 @@ mod tests {
         runtime.acknowledge_session(game, profile);
         assert!(runtime.pending_sessions().is_empty());
     }
+}
+
+fn session_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

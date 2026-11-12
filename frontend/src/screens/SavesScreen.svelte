@@ -9,17 +9,21 @@
   import type { Game, SaveHistoryEntry, SaveKind } from '../lib/types'
   import Loadable from '../lib/components/Loadable.svelte'
 
-  const kindLabel: Record<SaveKind, string> = {
-    beforeSwitch: 'Перед переключением профиля',
-    afterSession: 'После игровой сессии',
-    conflict: 'Вторая версия при конфликте',
-    beforeRestore: 'Перед откатом',
-    fileChanged: 'Изменение файлов',
-  }
+  import { filterHistory, groupHistory, kindLabel, sessionPeriod, type Grouping } from '../lib/saveHistory'
+  let query = $state('')
+  let profileId = $state('')
+  let kind = $state<SaveKind | ''>('')
+  let from = $state('')
+  let to = $state('')
+  let grouping = $state<Grouping>('session')
+
 
   let games = $state<Game[]>([])
   let gameId = $state<string | null>(null)
   let saves = $state<SaveHistoryEntry[]>([])
+  const profiles = $derived([...new Map(saves.map(save => [save.profileId, save.profileName])).entries()])
+  const filtered = $derived(filterHistory(saves, { query, profileId, kind, from, to }))
+  const groups = $derived(groupHistory(filtered, grouping))
   let loading = $state(true)
   let loadError = $state<string | null>(null)
   // Подтверждение требуется перед заменой текущих файлов.
@@ -65,7 +69,7 @@
 </script>
 
 <h2>Сохранения и откат</h2>
-<p class="muted">Копии сохранений, которые SaveHub делает перед рискованными действиями.</p>
+<p class="muted">Локальные снимки файлов сохранений после игры и перед заменой данных. Это отдельная история, не список Git-коммитов.</p>
 
 {#if !features.saveHistory}<p class="availability-note">История сохранений и восстановление пока недоступны в этой версии. Автоматические копии ещё не создаются.</p>{/if}
 {#if features.saveHistory}
@@ -79,9 +83,24 @@
   </select>
 </label>
 
+<div class="filters">
+  <label class="field"><span>Поиск</span><input type="search" bind:value={query} placeholder="Игра, профиль, причина или ID" /></label>
+  <label class="field"><span>Профиль</span><select bind:value={profileId}><option value="">Все профили</option>{#each profiles as [id, name]}<option value={id}>{name}</option>{/each}</select></label>
+  <label class="field"><span>Причина</span><select bind:value={kind}><option value="">Все причины</option>{#each Object.entries(kindLabel) as [value, label]}<option {value}>{label}</option>{/each}</select></label>
+  <label class="field"><span>С даты</span><input type="date" bind:value={from} /></label>
+  <label class="field"><span>По дату</span><input type="date" bind:value={to} min={from} /></label>
+  <label class="field"><span>Группировка</span><select bind:value={grouping}><option value="session">По игровой сессии</option><option value="game">По игре</option><option value="profile">По профилю</option><option value="day">По дню</option><option value="none">Без группировки</option></select></label>
+  <button onclick={() => { query = ''; profileId = ''; kind = ''; from = ''; to = '' }}>Сбросить фильтры</button>
+</div>
+<p class="muted">Найдено снимков: {filtered.length} из {saves.length}. Старые снимки без идентификатора сессии показаны отдельно.</p>
+{#if from && to && from > to}<p class="error" role="alert">Дата начала должна быть не позже даты окончания.</p>{/if}
 <Loadable {loading} error={loadError}>
+  {#each groups as group (group.key)}
+    <section aria-label={group.title}>
+      <h3>{group.title} <span class="muted">({group.saves.length})</span></h3>
+      {#if group.period}<p class="muted">{sessionPeriod(saves.filter(save => save.sessionId === group.key))}</p>{/if}
   <ul class="list">
-    {#each saves as save (save.id)}
+    {#each group.saves as save (save.id)}
       <li class="row">
         <div class="grow">
           <div>{kindLabel[save.kind]}</div>
@@ -98,9 +117,15 @@
           <button disabled={restoring} onclick={() => (confirming = save.id)}>Откатить</button>
         {/if}
       </li>
-    {:else}
-      <li class="row muted">Сохранений пока нет.</li>
     {/each}
   </ul>
+    </section>
+  {:else}<p class="muted">{saves.length ? 'По заданным фильтрам ничего не найдено.' : 'Сохранений пока нет.'}</p>
+  {/each}
 </Loadable>
 {/if}
+
+<style>
+  .filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+  .filters .field { flex: 1 1 180px; }
+</style>

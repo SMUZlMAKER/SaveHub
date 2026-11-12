@@ -68,6 +68,10 @@ export type SaveKind =
   | "fileChanged";
 
 export interface SaveHistoryEntry {
+  sessionId: string | null;
+  sessionStartedAt: number | null;
+  sessionEndedAt: number | null;
+  profileId: string;
   id: string;
   gameId: string;
   gameName: string;

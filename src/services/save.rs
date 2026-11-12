@@ -391,7 +391,15 @@ impl SaveService {
         let destination = history.join(&id);
         fs::copy_tree(&data, &destination).map_err(ServiceError::Adapter)?;
         self.stopped(game)?;
+        let session = if matches!(kind, SaveKind::AfterSession) {
+            self.runtime.pending_session(game, profile.id)
+        } else {
+            self.runtime.session(game)
+        };
         let save = Save {
+            session_id: session.map(|s| s.id),
+            session_started_at: session.map(|s| s.started_at),
+            session_ended_at: session.and_then(|s| s.ended_at),
             id,
             game_id: game,
             profile_id: profile.id,
