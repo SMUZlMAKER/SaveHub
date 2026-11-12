@@ -193,6 +193,7 @@ pub enum SaveKind {
     /// Текущее состояние перед откатом.
     BeforeRestore,
     FileChanged,
+    Manual,
 }
 
 fn save_dto(save: crate::domain::Save) -> SaveDto {
@@ -245,6 +246,7 @@ pub async fn list_save_history(
                     crate::domain::SaveKind::Conflict => SaveKind::Conflict,
                     crate::domain::SaveKind::BeforeRestore => SaveKind::BeforeRestore,
                     crate::domain::SaveKind::FileChanged => SaveKind::FileChanged,
+                    crate::domain::SaveKind::Manual => SaveKind::Manual,
                 },
                 created_at: save.created_at,
                 size_bytes: save.size_bytes,

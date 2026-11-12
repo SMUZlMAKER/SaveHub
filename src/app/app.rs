@@ -48,6 +48,10 @@ pub fn start() {
         )
         .invoke_handler(tauri::generate_handler![
             api::features::get_app_features,
+            api::manual_saves::get_manual_save_preferences,
+            api::manual_saves::get_manual_save_status,
+            api::manual_saves::save_manual_save_shortcut,
+            api::manual_saves::create_manual_save,
             api::launch::get_launch_status,
             api::launch::dismiss_launch_dialog,
             api::launch::create_game_shortcut,
@@ -264,9 +268,16 @@ pub fn start() {
             ));
             // Hidden webviews also run frontend IPC. Create both windows only after
             // every command dependency is managed, including the background workers.
+            app.manage(crate::app::manual_saves::ManualSaves::load(app.handle())?);
             for window_config in &app.config().app.windows {
                 tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?.build()?;
             }
+            if let Some(window) = app.get_webview_window("save-toast") {
+                window.set_ignore_cursor_events(true)?;
+                window.set_focusable(false)?;
+            }
+            app.state::<crate::app::manual_saves::ManualSaves>()
+                .activate();
             app.manage(crate::app::launch::LaunchReady);
             if !std::env::args().any(|arg| arg == "--autostart" || arg == "--launch-game") {
                 if let Some(window) = app.get_webview_window("main") {

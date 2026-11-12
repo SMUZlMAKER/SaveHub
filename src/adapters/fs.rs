@@ -350,6 +350,43 @@ pub fn copy_tree(source: &Path, destination: &Path) -> AdapterResult<()> {
     Ok(())
 }
 
+/// Read-only snapshot while a game is running. On Windows, deny write/delete sharing
+/// for every source file until copying and full byte comparison have completed.
+/// A writer already holding a file makes the operation fail rather than copy partial data.
+pub fn copy_live_tree(source: &Path, destination: &Path) -> AdapterResult<()> {
+    require_missing(destination)?;
+    let source = canonicalize(source)?;
+    let mut entries = Vec::new();
+    collect_tree(&source, &mut entries)?;
+    let mut handles = Vec::new();
+    for (path, metadata) in &entries {
+        if metadata.is_file() {
+            let mut options = fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.share_mode(1); // FILE_SHARE_READ: no writers or deletion.
+            }
+            handles.push(options.open(path).map_err(|error| io_error(path, error))?);
+        }
+    }
+    let result = (|| {
+        copy_tree(&source, destination)?;
+        if !trees_equal(&source, destination)? {
+            return Err(invalid(
+                "Файлы изменились во время копирования. Повторите снимок, когда игра завершит запись.",
+            ));
+        }
+        Ok(())
+    })();
+    if result.is_err() && destination.exists() {
+        let _ = remove_tree(destination);
+    }
+    drop(handles);
+    result
+}
+
 pub fn remove_file(path: &Path) -> AdapterResult<()> {
     match metadata(path)? {
         Some(metadata) if is_link(&metadata) => remove_symlink(path),
@@ -491,6 +528,38 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn manual_copy_preserves_source_and_refuses_existing_destination() {
+        let sandbox = Sandbox::new();
+        let source = sandbox.path("source");
+        let destination = sandbox.path("snapshot");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("save.dat"), b"saved").unwrap();
+        copy_live_tree(&source, &destination).unwrap();
+        assert!(trees_equal(&source, &destination).unwrap());
+        fs::write(destination.join("save.dat"), b"precious").unwrap();
+        assert!(copy_live_tree(&source, &destination).is_err());
+        assert_eq!(fs::read(destination.join("save.dat")).unwrap(), b"precious");
+        assert_eq!(fs::read(source.join("save.dat")).unwrap(), b"saved");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn manual_copy_rejects_a_file_open_for_writing() {
+        let sandbox = Sandbox::new();
+        let source = sandbox.path("source");
+        let destination = sandbox.path("snapshot");
+        fs::create_dir(&source).unwrap();
+        let writer = fs::File::create(source.join("save.dat")).unwrap();
+        assert!(matches!(
+            copy_live_tree(&source, &destination),
+            Err(AdapterError::FileLocked(_))
+        ));
+        assert!(!destination.exists());
+        drop(writer);
+        copy_live_tree(&source, &destination).unwrap();
     }
 
     #[test]

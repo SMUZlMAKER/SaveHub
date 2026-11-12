@@ -209,6 +209,33 @@ impl SaveService {
             .map(Some)
     }
 
+    /// Never change bindings or live files while the game is running.
+    pub fn capture_manual(&self, game: GameId) -> ServiceResult<Save> {
+        let _guard = self.lock()?;
+        let running = self
+            .runtime
+            .running_games()
+            .ok_or(ServiceError::ProcessesUnknown)?;
+        if !running.contains(&game) {
+            return Err(ServiceError::InvalidInput(
+                "Игра уже завершена; дождитесь снимка после сессии".into(),
+            ));
+        }
+        let profile_id = self
+            .runtime
+            .active_profile()
+            .ok_or_else(|| ServiceError::InvalidInput("Нет активного профиля".into()))?;
+        let profile = self.profile(&profile_id.to_string())?;
+        let source = self.source(game)?;
+        let target = self.target(game, &profile)?;
+        if fs::link_destination(&source).map_err(ServiceError::Adapter)?
+            != Some(fs::canonicalize(&target).map_err(ServiceError::Adapter)?)
+        {
+            return Err(ServiceError::Conflict("Сохранения игры не привязаны к текущему профилю. Закройте игру и запустите её через SaveHub".into()));
+        }
+        self.snapshot_tree(game, &profile, SaveKind::Manual, &target)
+    }
+
     pub fn is_bound(&self, game: GameId, profile: &ProfileId) -> ServiceResult<bool> {
         let _guard = self.lock()?;
         let source = self.source(game)?;
@@ -389,8 +416,12 @@ impl SaveService {
             .unwrap_or_default();
         let id = uuid::Uuid::new_v4().to_string();
         let destination = history.join(&id);
-        fs::copy_tree(&data, &destination).map_err(ServiceError::Adapter)?;
-        self.stopped(game)?;
+        if matches!(kind, SaveKind::Manual) {
+            fs::copy_live_tree(data, &destination).map_err(ServiceError::Adapter)?;
+        } else {
+            fs::copy_tree(data, &destination).map_err(ServiceError::Adapter)?;
+            self.stopped(game)?;
+        }
         let session = if matches!(kind, SaveKind::AfterSession) {
             self.runtime.pending_session(game, profile.id)
         } else {
@@ -410,8 +441,18 @@ impl SaveService {
                 .as_millis() as u64,
             size_bytes: fs::size(&destination).map_err(ServiceError::Adapter)?,
         };
+        if save.session_id.is_some() && save.session_ended_at.is_some() {
+            for previous in &mut saves {
+                if previous.session_id == save.session_id {
+                    previous.session_ended_at = save.session_ended_at;
+                }
+            }
+        }
         saves.push(save.clone());
-        config::write_saves(&history.join("index.json"), &saves).map_err(ServiceError::Adapter)?;
+        if let Err(error) = config::write_saves(&history.join("index.json"), &saves) {
+            let _ = fs::remove_tree(&destination);
+            return Err(ServiceError::Adapter(error));
+        }
         Ok(save)
     }
 
@@ -655,6 +696,47 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn manual_and_final_snapshots_share_the_recorded_session_and_preserve_live_data() {
+        let f = Fixture::new();
+        f.bind();
+        f.service.runtime.set_running_games(vec![f.game]);
+        let manual = f.service.capture_manual(f.game).unwrap();
+        assert!(matches!(manual.kind, SaveKind::Manual));
+        assert!(manual.session_id.is_some());
+        assert!(manual.session_started_at.is_some());
+        assert!(manual.session_ended_at.is_none());
+        assert_eq!(
+            fs::read(&f.source.join("save.dat")).unwrap(),
+            b"original\0\xff"
+        );
+        f.service.runtime.set_running_games(vec![]);
+        let final_save = f
+            .service
+            .capture_session(f.game, f.profile)
+            .unwrap()
+            .unwrap();
+        assert_eq!(manual.session_id, final_save.session_id);
+        assert_eq!(manual.session_started_at, final_save.session_started_at);
+        assert!(final_save.session_ended_at.unwrap() >= manual.session_started_at.unwrap());
+        let stored_manual = f.service.get_save(&manual.id).unwrap();
+        assert_eq!(stored_manual.session_ended_at, final_save.session_ended_at);
+        assert!(f.service.capture_manual(f.game).is_err());
+    }
+
+    #[test]
+    fn manual_snapshot_does_not_bind_a_running_game_or_accept_unknown_processes() {
+        let f = Fixture::new();
+        f.service.runtime.set_running_games(vec![f.game]);
+        assert!(f.service.capture_manual(f.game).is_err());
+        assert!(fs::read_symlink(&f.source).unwrap().is_none());
+        f.service.runtime.invalidate_process_state();
+        assert!(matches!(
+            f.service.capture_manual(f.game),
+            Err(ServiceError::ProcessesUnknown)
+        ));
     }
 
     #[test]

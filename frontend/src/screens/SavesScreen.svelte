@@ -29,6 +29,14 @@
   // Подтверждение требуется перед заменой текущих файлов.
   let confirming = $state<string | null>(null)
   let restoring = $state(false)
+  let capturing = $state(false)
+  async function capture() {
+    if (capturing) return
+    capturing = true
+    try { await api.createManualSave(gameId); notice.show('Ручной снимок сохранён') }
+    catch (e) { notice.error(e) }
+    finally { capturing = false }
+  }
   let generation = 0
 
   async function load() {
@@ -83,6 +91,8 @@
   </select>
 </label>
 
+<button disabled={capturing || restoring} onclick={capture}>{capturing ? 'Создаём снимок…' : 'Снимок сейчас'}</button>
+<p class="muted">Для выбранной запущенной игры; при выборе «Все игры» должна быть запущена ровно одна игра.</p>
 <div class="filters">
   <label class="field"><span>Поиск</span><input type="search" bind:value={query} placeholder="Игра, профиль, причина или ID" /></label>
   <label class="field"><span>Профиль</span><select bind:value={profileId}><option value="">Все профили</option>{#each profiles as [id, name]}<option value={id}>{name}</option>{/each}</select></label>

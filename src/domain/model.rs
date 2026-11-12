@@ -51,6 +51,7 @@ pub enum SaveKind {
     Conflict,
     BeforeRestore,
     FileChanged,
+    Manual,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -132,4 +133,19 @@ pub enum ProfileActivationError {
 
 fn default_ask_profile_before_launch() -> bool {
     true
+}
+
+#[cfg(test)]
+mod session_compatibility_tests {
+    #[test]
+    fn snapshots_without_session_metadata_remain_readable() {
+        let save: super::Save = serde_json::from_value(serde_json::json!({
+            "id": "old-save", "game_id": uuid::Uuid::nil(), "profile_id": uuid::Uuid::nil(),
+            "kind": "AfterSession", "created_at": 1, "size_bytes": 0
+        }))
+        .unwrap();
+        assert!(save.session_id.is_none());
+        assert!(save.session_started_at.is_none());
+        assert!(save.session_ended_at.is_none());
+    }
 }

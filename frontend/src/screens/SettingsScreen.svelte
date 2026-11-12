@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ManualSaveSettings from '../lib/components/ManualSaveSettings.svelte'
   import AppUpdates from '../lib/components/AppUpdates.svelte'
   import { onMount, tick } from 'svelte'
   import { api, describeError } from '../lib/api'
@@ -80,6 +81,7 @@
 <h2>Настройки</h2>
 
 <AppUpdates />
+<ManualSaveSettings />
 
 {#if loadError}<button onclick={load}>Повторить загрузку настроек</button>{/if}
 <Loadable {loading} error={loadError}>

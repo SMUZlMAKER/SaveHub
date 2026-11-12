@@ -6,6 +6,7 @@ export const kindLabel: Record<SaveKind, string> = {
   conflict: 'Вторая версия при конфликте',
   beforeRestore: 'Перед откатом',
   fileChanged: 'Изменение файлов',
+  manual: 'Ручной снимок',
 }
 export type Grouping = 'session' | 'game' | 'profile' | 'day' | 'none'
 export interface HistoryFilters {

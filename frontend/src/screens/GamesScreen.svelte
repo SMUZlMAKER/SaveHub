@@ -25,6 +25,14 @@
   let savedNote = $state('')
   let editor = $state<{ mode: 'add' | 'edit' | 'resolve'; game?: Game } | null>(null)
   let launching = $state<string | null>(null)
+  let capturing = $state<string | null>(null)
+  async function capture(game: Game) {
+    if (capturing) return
+    capturing = game.id
+    try { await api.createManualSave(game.id); notice.show(`${game.name}: ручной снимок сохранён`) }
+    catch (e) { notice.error(e) }
+    finally { capturing = null }
+  }
   let shortcutting = $state<string | null>(null)
   async function launch(game: Game) {
     launching = game.id
@@ -122,6 +130,7 @@
           {#if game.status === 'running'}<div class="muted">Закройте игру, чтобы изменить её настройки.</div>{/if}
         </div>
         <div class="game-actions">
+          {#if game.status === 'running'}<button disabled={!!capturing} onclick={() => capture(game)}>{capturing === game.id ? 'Создаём снимок…' : 'Снимок сейчас'}</button>{/if}
           <button class="primary" disabled={!!editor || !!launching || game.status !== 'found'} onclick={() => launch(game)}>{launching === game.id ? 'Подготовка…' : 'Запустить'}</button>
           <button disabled={!!editor || !!shortcutting || game.status !== 'found'} onclick={() => shortcut(game)}>{shortcutting === game.id ? 'Создание…' : 'Ярлык на рабочий стол'}</button>
           <button disabled={!!editor || !game.processStateKnown || game.status === 'running'} onclick={() => edit('edit', game)}>Настроить</button>
