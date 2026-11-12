@@ -10,7 +10,10 @@ use crate::{
 };
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tauri::{Emitter, Manager};
 
@@ -20,6 +23,7 @@ pub struct ManualSaves {
     keyboard: hotkey::Hotkey,
     status: Mutex<ManualSaveStatus>,
     configure: Mutex<()>,
+    recording_shortcut: AtomicBool,
 }
 impl ManualSaves {
     pub fn load(app: &tauri::AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
@@ -27,7 +31,7 @@ impl ManualSaves {
         let preferences = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => ManualSavePreferences {
-                shortcut: "Ctrl+Alt+F8".into(),
+                shortcut: "Ctrl+Alt+F9".into(),
                 error: None,
             },
             Err(e) => return Err(e.into()),
@@ -36,6 +40,22 @@ impl ManualSaves {
         let keyboard = hotkey::Hotkey::start(move || {
             let app = handle.clone();
             tauri::async_runtime::spawn(async move {
+                let shortcut = {
+                    let state = app.state::<ManualSaves>();
+                    state
+                        .recording_shortcut
+                        .load(Ordering::SeqCst)
+                        .then(|| state.preferences().shortcut)
+                };
+                if let Some(shortcut) = shortcut {
+                    if app
+                        .get_webview_window("main")
+                        .is_some_and(|window| window.is_focused().unwrap_or(false))
+                    {
+                        let _ = app.emit("shortcut-recorded", shortcut);
+                        return;
+                    }
+                }
                 let _ = capture(app, None).await;
             });
         });
@@ -44,12 +64,16 @@ impl ManualSaves {
             path,
             keyboard,
             configure: Mutex::new(()),
+            recording_shortcut: AtomicBool::new(false),
             status: Mutex::new(ManualSaveStatus {
                 sequence: 0,
                 success: true,
                 message: String::new(),
             }),
         })
+    }
+    pub fn set_shortcut_recording(&self, recording: bool) {
+        self.recording_shortcut.store(recording, Ordering::SeqCst);
     }
     pub fn activate(&self) {
         let value = self.preferences().shortcut;

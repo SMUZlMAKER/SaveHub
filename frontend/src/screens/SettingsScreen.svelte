@@ -136,7 +136,7 @@
       {settings.hasGithubToken ? 'Токен сохранён. Новый заменит старый.' : 'Токен ещё не сохранён.'}
     </p>
     <form class="inline-form" onsubmit={saveToken} aria-busy={savingToken}>
-      <input id="settings-token" class="grow" aria-label="Токен GitHub" disabled={saving || savingToken} type="password" bind:value={token} placeholder="ghp_…" autocomplete="off" />
+      <input id="settings-token" class="grow" aria-label="Токен GitHub" disabled={saving || savingToken} type="password" bind:value={token} placeholder={settings.hasGithubToken ? '******' : 'ghp_…'} autocomplete="off" />
       <button disabled={!token.trim() || saving || savingToken}>{savingToken ? 'Сохраняем…' : 'Сохранить токен'}</button>
     </form>
     {#if tokenError}<p class="error" role="alert">{tokenError}</p>{/if}

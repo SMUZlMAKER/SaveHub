@@ -100,7 +100,7 @@
       subscribe<UpdateStatus>(events.updateStatusChanged, (value) => { update = value }),
       subscribe(events.syncStatusChanged, loadSync),
       subscribe(events.conflictsChanged, loadConflicts),
-      // Пункты трея «Сохранения и откат…» и «Настройки…» открывают окно на нужном экране
+      // Пункты трея «Сохранения…» и «Настройки…» открывают окно на нужном экране
       subscribe<string>(events.navigate, (target) => {
         if ((screenIds as string[]).includes(target)) screen = target as ScreenId
       }),

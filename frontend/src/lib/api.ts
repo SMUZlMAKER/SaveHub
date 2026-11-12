@@ -69,6 +69,7 @@ export function describeError(e: unknown): string {
 
 // Ключи аргументов — camelCase: Tauri сам сопоставит их со snake_case-параметрами в Rust.
 export const api = {
+  setShortcutRecording: (recording: boolean) => call<void>("set_shortcut_recording", { recording }),
   getManualSavePreferences: () => call<ManualSavePreferences>("get_manual_save_preferences"),
   getManualSaveStatus: () => call<ManualSaveStatus>("get_manual_save_status"),
   saveManualSaveShortcut: (shortcut: string) => call<void>("save_manual_save_shortcut", { shortcut }),

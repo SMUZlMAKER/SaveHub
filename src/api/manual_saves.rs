@@ -36,3 +36,8 @@ pub async fn save_manual_save_shortcut(app: tauri::AppHandle, shortcut: String) 
 pub async fn create_manual_save(app: tauri::AppHandle, game_id: Option<GameId>) -> ApiResult<()> {
     crate::app::manual_saves::capture(app, game_id).await
 }
+
+#[tauri::command]
+pub fn set_shortcut_recording(state: tauri::State<'_, ManualSaves>, recording: bool) {
+    state.set_shortcut_recording(recording);
+}

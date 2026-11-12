@@ -51,6 +51,7 @@ pub fn start() {
             api::manual_saves::get_manual_save_preferences,
             api::manual_saves::get_manual_save_status,
             api::manual_saves::save_manual_save_shortcut,
+            api::manual_saves::set_shortcut_recording,
             api::manual_saves::create_manual_save,
             api::launch::get_launch_status,
             api::launch::dismiss_launch_dialog,
