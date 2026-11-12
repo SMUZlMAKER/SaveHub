@@ -7,8 +7,8 @@
 
 Проект команды #174 на хакатоне DevDays Осень 2026 (ИТМО).
 
-- Презентация: _ссылка будет добавлена_
-- Ролик: _ссылка будет добавлена_
+- Презентация: https://drive.google.com/file/d/1HWSkgXabKDa7BaAGWQewJEHUfBopoqae/view?usp=sharing
+- Ролик: https://drive.google.com/file/d/1qmLZ0_T_BEt6ziHJQ3UYSwej8y7KWSkg/view?usp=sharing
 - Страница проекта на вики: https://cs-uni.ru/index.php?title=Savehub_DDF26
 - Релизы: https://github.com/SMUZlMAKER/SaveHub/releases
 
